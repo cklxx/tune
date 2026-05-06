@@ -35,6 +35,15 @@ there is no dependency on the system `ssh`, `sshpass`, or `rsync` binaries.
   (so re-running is a no-op), atomic write, perms tightened to 0600/0700.
   `--jump` does the same on the jump host. Run once after the first
   password connect to graduate to key auth.
+- **`tn doctor`** — probes every host in your config in parallel with a
+  short timeout and reports dial / ping / pass-fail. `--json` for
+  monitoring; exits non-zero if any host failed.
+- **`tn mirror <remote> <local>`** — pull a remote tree to a local
+  directory and (without `--once`) keep it polling for changes. Skips
+  unchanged files by (size, mtime), supports `--include`/`--exclude`
+  globs, optional `--delete` to remove locals that vanished remotely,
+  parallel downloads via `--workers`. Run grep/IDE/LSP locally for
+  fast code reading.
 - **TOFU host-key pinning.** First connect prompts; subsequent connects
   verify against `~/.tn/known_hosts`.
 
@@ -191,11 +200,23 @@ server or network egress:
 
 ## Roadmap
 
-- Persistent daemon (`tn daemon`) — sub-10ms per-call latency by avoiding
-  TCP/SSH handshakes on each invocation.
-- Native rsync-style delta sync.
-- Auto-reconnect with op replay.
-- Optional remote agent (`tnd`) for batched syscalls and watch-mode mirror.
+- **Persistent daemon (`tn daemon`)** — per-host Unix-socket daemon that
+  holds the SSH client open, so subsequent `tn exec` / `tn read` etc.
+  cost ~5ms instead of 200-500ms. CLI auto-attaches if running, falls
+  back to direct dial otherwise. (Foundation laid; not yet shipped.)
+- **Native rsync-style delta sync** — block-level diff for large
+  files in `tn push` / `tn mirror`.
+- **Connection-level auto-reconnect with op replay** — currently `tn
+  proxy` reconnects on its own; a generic `sshx.Client` redial would
+  also help long-running shells and exec.
+- **Optional remote agent (`tnd`)** — small Go binary auto-uploaded to
+  the remote (à la Mutagen) that turns 50ms-per-stat into 1ms by
+  batching syscalls. Required for a usable bidirectional `tn mirror`.
+- **Bidirectional mirror** — local edits propagate up; remote edits
+  propagate down; conflict resolution. (Today's `tn mirror` is one-way.)
+
+See [docs/comparison.md](docs/comparison.md) for how these compare to
+Mutagen, distant, Eternal Terminal, and friends.
 
 ## License
 

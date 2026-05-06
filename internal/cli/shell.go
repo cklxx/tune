@@ -1,11 +1,10 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
@@ -55,17 +54,11 @@ var shellCmd = &cobra.Command{
 			return err
 		}
 
-		// Forward window resizes (SIGWINCH).
-		winCh := make(chan os.Signal, 1)
-		signal.Notify(winCh, syscall.SIGWINCH)
-		defer signal.Stop(winCh)
-		go func() {
-			for range winCh {
-				if w, h, err := term.GetSize(fd); err == nil {
-					_ = sess.WindowChange(h, w)
-				}
-			}
-		}()
+		// Forward window resizes — Unix uses SIGWINCH; Windows is a stub
+		// for now (see shell_windows.go).
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		watchWindowSize(ctx, fd, sess)
 
 		sess.Stdin = os.Stdin
 		sess.Stdout = os.Stdout

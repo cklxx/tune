@@ -68,12 +68,12 @@ func Dial(ctx context.Context, cfg *config.Host, policy HostKeyPolicy) (*Client,
 		}
 		conn, err := dialer.DialContext(ctx, "tcp", jumpAddr)
 		if err != nil {
-			return nil, fmt.Errorf("dial jump %s: %w", jumpAddr, err)
+			return nil, classifyDialError("jump "+jumpAddr, err)
 		}
 		jc, ch, reqs, err := ssh.NewClientConn(conn, jumpAddr, jumpCfg)
 		if err != nil {
 			conn.Close()
-			return nil, fmt.Errorf("ssh handshake jump: %w", err)
+			return nil, classifyHandshakeError("jump "+jumpAddr, err)
 		}
 		c.jump = ssh.NewClient(jc, ch, reqs)
 		// Open a direct-tcpip channel from the jump to the target.
@@ -81,7 +81,7 @@ func Dial(ctx context.Context, cfg *config.Host, policy HostKeyPolicy) (*Client,
 		inner, err := c.jump.DialContext(ctx, "tcp", targetAddr)
 		if err != nil {
 			c.jump.Close()
-			return nil, fmt.Errorf("dial target through jump: %w", err)
+			return nil, fmt.Errorf("dial %s through jump (jump is up but couldn't reach target — firewall on jump? wrong target addr?): %w", targetAddr, err)
 		}
 		underlying = inner
 		sshAddr = targetAddr
@@ -89,7 +89,7 @@ func Dial(ctx context.Context, cfg *config.Host, policy HostKeyPolicy) (*Client,
 		targetAddr := config.EnsureAddrPort(cfg.Target.Addr)
 		conn, err := dialer.DialContext(ctx, "tcp", targetAddr)
 		if err != nil {
-			return nil, fmt.Errorf("dial target %s: %w", targetAddr, err)
+			return nil, classifyDialError(targetAddr, err)
 		}
 		underlying = conn
 		sshAddr = targetAddr
@@ -115,7 +115,7 @@ func Dial(ctx context.Context, cfg *config.Host, policy HostKeyPolicy) (*Client,
 		if c.jump != nil {
 			c.jump.Close()
 		}
-		return nil, fmt.Errorf("ssh handshake target: %w", err)
+		return nil, classifyHandshakeError(sshAddr, err)
 	}
 	c.target = ssh.NewClient(tc, ch, reqs)
 

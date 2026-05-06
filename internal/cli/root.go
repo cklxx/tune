@@ -39,6 +39,8 @@ func Execute() error {
 		statusCmd,
 		benchCmd,
 		uploadKeyCmd,
+		doctorCmd,
+		mirrorCmd,
 	)
 	return rootCmd.Execute()
 }
