@@ -38,6 +38,7 @@ func Execute() error {
 		shellCmd,
 		statusCmd,
 		benchCmd,
+		uploadKeyCmd,
 	)
 	return rootCmd.Execute()
 }

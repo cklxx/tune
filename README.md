@@ -29,6 +29,12 @@ there is no dependency on the system `ssh`, `sshpass`, or `rsync` binaries.
 - **`tn bench`** — measure dial cost, RTT distribution over N pings,
   per-call exec turnaround, and single-stream throughput. Useful to decide
   whether to spin up the (planned) daemon mode.
+- **`tn upload-key`** — ssh-copy-id equivalent. Reads your local public
+  keys (defaults to ed25519/ecdsa/rsa under `~/.ssh`), merges them into
+  the remote's `~/.ssh/authorized_keys` deduped by SHA256 fingerprint
+  (so re-running is a no-op), atomic write, perms tightened to 0600/0700.
+  `--jump` does the same on the jump host. Run once after the first
+  password connect to graduate to key auth.
 - **TOFU host-key pinning.** First connect prompts; subsequent connects
   verify against `~/.tn/known_hosts`.
 
@@ -84,6 +90,10 @@ $ tn read /etc/hostname
 10-0-0-42
 
 $ echo "FOO=bar" | tn write /tmp/env
+
+$ tn upload-key             # graduate from password to key auth
+uploading to target:
+  1 key(s) added, 0 already present (total 1)
 ```
 
 ## Letting the remote use your local network
