@@ -37,6 +37,7 @@ func Execute() error {
 		proxyCmd,
 		shellCmd,
 		statusCmd,
+		benchCmd,
 	)
 	return rootCmd.Execute()
 }

@@ -37,13 +37,12 @@ var statusCmd = &cobra.Command{
 		c, err := sshx.Dial(ctx, host, policy)
 		dialMs := time.Since(dialStart).Milliseconds()
 		report := map[string]any{
-			"host":        host.Name,
-			"target":      host.Target.Addr,
-			"hasJump":     host.Jump != nil,
-			"dialMs":      dialMs,
-			"clientVer":   "tn 0.1",
-			"goVersion":   runtime.Version(),
-			"compress":    host.Compress,
+			"host":      host.Name,
+			"target":    host.Target.Addr,
+			"hasJump":   host.Jump != nil,
+			"dialMs":    dialMs,
+			"clientVer": "tn 0.1",
+			"goVersion": runtime.Version(),
 		}
 		if err != nil {
 			report["ok"] = false
@@ -74,7 +73,7 @@ func emit(report map[string]any, _ bool) error {
 	if flagJSON {
 		return json.NewEncoder(os.Stdout).Encode(report)
 	}
-	order := []string{"host", "target", "hasJump", "dialMs", "pingMs", "remote", "compress", "clientVer", "goVersion", "ok", "error", "pingError"}
+	order := []string{"host", "target", "hasJump", "dialMs", "pingMs", "remote", "clientVer", "goVersion", "ok", "error", "pingError"}
 	for _, k := range order {
 		v, ok := report[k]
 		if !ok {

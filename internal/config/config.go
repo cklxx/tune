@@ -36,9 +36,6 @@ type Host struct {
 	Jump *Hop `yaml:"jump,omitempty"`
 	// KnownHosts, when set, overrides the default $TN_HOME/known_hosts.
 	KnownHosts string `yaml:"knownHosts,omitempty"`
-	// Compress enables zlib compression on the SSH transport. Useful on slow
-	// or high-latency links.
-	Compress bool `yaml:"compress,omitempty"`
 }
 
 type Config struct {

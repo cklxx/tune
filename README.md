@@ -26,6 +26,9 @@ there is no dependency on the system `ssh`, `sshpass`, or `rsync` binaries.
 - **`tn shell`** — interactive PTY with window-resize forwarding.
 - **`tn status`** — dial time, ping RTT, remote `uname` + `df` summary.
   `--json` for monitoring.
+- **`tn bench`** — measure dial cost, RTT distribution over N pings,
+  per-call exec turnaround, and single-stream throughput. Useful to decide
+  whether to spin up the (planned) daemon mode.
 - **TOFU host-key pinning.** First connect prompts; subsequent connects
   verify against `~/.tn/known_hosts`.
 
@@ -122,7 +125,6 @@ hosts:
       addr: jump.example.com:22
       user: alice
       passwordCmd: pass show ssh/jump
-    compress: true
 ```
 
 Auth precedence per hop, in order:
@@ -150,6 +152,32 @@ $ tn read --json /etc/hostname | jq -r '.content'
 `tn exec` always streams stdout/stderr verbatim and propagates the remote
 exit code, so it composes cleanly with shell pipelines and agent tool
 harnesses.
+
+## Development
+
+```sh
+make build    # build ./tn
+make test     # run go test ./... — fully hermetic (no real ssh required)
+make vet      # static analysis
+```
+
+The test suite includes end-to-end coverage that does not need a real SSH
+server or network egress:
+
+- `internal/sshtest` boots in-process SSH servers (`session`/`exec`,
+  `subsystem sftp`, `direct-tcpip`, `tcpip-forward`) on a free port using
+  generated ed25519 host keys.
+- `sshx_test.TestDialDirect` / `TestDialThroughJump` / `TestDialRejectsBadKey`
+  cover the dial path and auth.
+- `sshx_test.TestReverseSocksThroughSSH` is the killer integration test:
+  boots a target SSH server, opens a `tcpip-forward` listener, runs the
+  real `socks.Serve` over the channels, and round-trips bytes through a
+  local "echo internet" listener — exactly the path `tn proxy` exercises.
+- `cli_test.TestPushPullRoundTrip` / `TestWriteFileAtomicity` /
+  `TestReadFilePlainAndJSON` / `TestList` exercise SFTP via a real
+  `pkg/sftp` server rooted at `t.TempDir()`.
+- `cli_test.TestBenchEndToEnd` runs the bench command's logic against an
+  in-process server with a stdin-draining exec handler.
 
 ## Roadmap
 

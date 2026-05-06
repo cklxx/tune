@@ -51,8 +51,6 @@ var initCmd = &cobra.Command{
 			host.Jump = nil
 		}
 
-		host.Compress = yes(r, "enable transport compression?", host.Compress)
-
 		cfg.Hosts[name] = host
 		if cfg.DefaultHost == "" || len(cfg.Hosts) == 1 {
 			cfg.DefaultHost = name

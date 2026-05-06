@@ -68,7 +68,7 @@ want to fetch a remote source file inline; use --json for a structured wrapper.`
 			return err
 		}
 		defer fc.Close()
-		return readFile(fc, args[0])
+		return readFile(fc, args[0], cmd.OutOrStdout())
 	},
 }
 
@@ -120,15 +120,15 @@ func init() {
 	lsCmd.Flags().BoolVarP(&lsLong, "long", "l", false, "long format with size and mtime")
 }
 
-// readFile streams remote file to stdout. With --json, wraps in a frame.
-func readFile(fc *sftp.Client, path string) error {
+// readFile streams remote file to w. With --json, wraps in a frame.
+func readFile(fc *sftp.Client, path string, w io.Writer) error {
 	f, err := fc.Open(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 	if !flagJSON {
-		_, err := io.Copy(os.Stdout, f)
+		_, err := io.Copy(w, f)
 		return err
 	}
 	st, err := f.Stat()
@@ -139,7 +139,7 @@ func readFile(fc *sftp.Client, path string) error {
 	if err != nil {
 		return err
 	}
-	return json.NewEncoder(os.Stdout).Encode(map[string]any{
+	return json.NewEncoder(w).Encode(map[string]any{
 		"path":    path,
 		"size":    st.Size(),
 		"mode":    fmt.Sprintf("%#o", st.Mode().Perm()),
@@ -194,11 +194,11 @@ func list(fc *sftp.Client, path string, out io.Writer) error {
 			Mtime int64  `json:"mtime"`
 			IsDir bool   `json:"isDir"`
 		}
-		out := make([]row, 0, len(entries))
+		rows := make([]row, 0, len(entries))
 		for _, e := range entries {
-			out = append(out, row{e.Name(), e.Size(), fmt.Sprintf("%#o", e.Mode().Perm()), e.ModTime().Unix(), e.IsDir()})
+			rows = append(rows, row{e.Name(), e.Size(), fmt.Sprintf("%#o", e.Mode().Perm()), e.ModTime().Unix(), e.IsDir()})
 		}
-		return json.NewEncoder(os.Stdout).Encode(out)
+		return json.NewEncoder(out).Encode(rows)
 	}
 	for _, e := range entries {
 		if lsLong {
