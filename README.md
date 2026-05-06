@@ -49,17 +49,51 @@ there is no dependency on the system `ssh`, `sshpass`, or `rsync` binaries.
 
 ## Install
 
+**One-liner** (Linux / macOS, prebuilt binary, falls back to `go install`
+if no published release matches your platform):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/cklxx/tune/main/install.sh | sh
+```
+
+Pin a version or override the install directory:
+
+```sh
+VERSION=v0.1.0 INSTALL_DIR=$HOME/.local/bin \
+  sh -c "$(curl -fsSL https://raw.githubusercontent.com/cklxx/tune/main/install.sh)"
+```
+
+**With Go**:
+
 ```sh
 go install github.com/cklxx/tune/cmd/tn@latest
 ```
 
-Or build from source:
+**From source**:
 
 ```sh
 git clone https://github.com/cklxx/tune
 cd tune
-go build -o tn ./cmd/tn
+make build       # writes ./tn
 ```
+
+**Windows**: download the `.zip` from
+[the latest release](https://github.com/cklxx/tune/releases/latest)
+and unpack `tn.exe` somewhere on your `PATH`.
+
+## Releasing
+
+Tag-driven via GoReleaser. To cut a new release:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+`.github/workflows/release.yml` runs vet + tests, then GoReleaser builds
+the cross-platform matrix (linux/darwin/windows × amd64/arm64, sans
+windows-arm64), uploads tar.gz/zip archives + `checksums.txt` to a
+GitHub Release, and renders an install snippet in the release notes.
 
 ## Quick start
 

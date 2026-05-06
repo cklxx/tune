@@ -22,6 +22,19 @@ Configure hosts with "tn init", then use "tn exec", "tn push", "tn pull",
 	SilenceErrors: true,
 }
 
+// SetVersion sets the version string shown by `tn --version`. main() is
+// expected to call this with a value injected at link time via:
+//
+//	go build -ldflags "-X main.version=v0.1.0"
+//
+// goreleaser does this automatically.
+func SetVersion(v string) {
+	if v == "" {
+		v = "dev"
+	}
+	rootCmd.Version = v
+}
+
 // Execute runs the root cobra command. It returns the error returned by the
 // command (or nil); main() is expected to exit non-zero on a non-nil error.
 func Execute() error {
