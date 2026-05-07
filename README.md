@@ -161,6 +161,47 @@ $ tn exec --proxy -- pip install requests
 on your local side (that's what `socks5h://` means), so private DNS visible
 only to your local network works.
 
+## Behind a Kerberos / GSSAPI jump host
+
+Some corporate jump hosts (ByteDance's `jumpecs-hl.byted.org`, Google
+`relay.corp`, etc.) require `gssapi-with-mic` — Kerberos auth — and
+reject everything else. `golang.org/x/crypto/ssh` doesn't implement
+GSSAPI, so `tn` cannot dial these jumps directly.
+
+The escape hatch is to let your system `ssh` (which has GSSAPI) handle
+the jump as a TCP forward, and point `tn` at the resulting local port:
+
+```sh
+# Terminal 1: run the GSSAPI'd tunnel. Reuse your existing ticket
+# (kinit / klist) — system ssh handles the auth on the jump.
+ssh -N -L 12222:target.internal:22 jump.corp.example.com
+
+# Terminal 2: tn talks to the target via 127.0.0.1:12222 — no jump
+# needed in tn's config.
+cat > ~/.tn/config.yaml <<'YAML'
+defaultHost: prod
+hosts:
+  prod:
+    target:
+      addr: 127.0.0.1:12222
+      user: alice
+      identityFile: ~/.ssh/id_ed25519
+YAML
+
+tn status
+```
+
+If you trust the network (loopback only, no MITM possible), add
+`--accept-new` to skip the first-connect TOFU prompt:
+
+```sh
+tn --accept-new status         # pin the host key on first sight
+TN_ACCEPT_NEW_HOSTKEYS=1 tn ls /etc   # same, via env
+```
+
+When `tn` detects the server only offers `gssapi-with-mic` it surfaces
+this hint directly in the error message — you don't have to guess.
+
 ## Config
 
 `~/.tn/config.yaml` (override with `$TN_HOME`):

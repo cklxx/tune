@@ -17,6 +17,26 @@ import (
 var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show connection health: dial time, RTT, remote uname",
+	Long: `Dials the host once, runs a minimal session to read uname/uptime/df,
+and prints the result. The plain output is one "key: value" line per
+field — easy to grep, easy for an agent to read without parsing JSON.
+
+Fields:
+  host        alias from ~/.tn/config.yaml
+  target      target addr that was dialled
+  hasJump     whether a jump host is configured
+  dialMs      time to TCP+SSH+jump handshake (ms)
+  pingMs      one-shot keepalive RTT (ms) — ~handshake-free per-call cost
+  remote      uname -srm | uptime | df -h $HOME (one line each)
+  ok          true if dial+ping+session all succeeded
+  error       on failure: classified message ("auth failed — try
+              tn upload-key", "VPN down?", etc.)
+
+Exits 0 even on failure — read "ok:" or use --json for a hard signal.
+For multi-host pass/fail in CI, use "tn doctor".`,
+	Example: `  tn status
+  tn status -H prod
+  tn status --json | jq '.ok'`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := config.Load()
 		if err != nil {
@@ -26,10 +46,7 @@ var statusCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		policy := sshx.PolicyTOFU
-		if flagInsecure {
-			policy = sshx.PolicyInsecure
-		}
+		policy := currentPolicy()
 
 		dialStart := time.Now()
 		ctx, cancel := context.WithTimeout(context.Background(), flagTimeout)

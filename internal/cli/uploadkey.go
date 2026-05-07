@@ -67,10 +67,7 @@ separate connection).`,
 		if err != nil {
 			return err
 		}
-		policy := sshx.PolicyTOFU
-		if flagInsecure {
-			policy = sshx.PolicyInsecure
-		}
+		policy := currentPolicy()
 
 		if uploadKeyJump {
 			if host.Jump == nil {

@@ -13,7 +13,29 @@ import (
 var initCmd = &cobra.Command{
 	Use:   "init [name]",
 	Short: "Interactively register a host in ~/.tn/config.yaml",
-	Args:  cobra.MaximumNArgs(1),
+	Long: `Walks you through configuring one host. Defaults to alias "default" if
+you don't pass [name]. For each hop (target and optionally a jump host)
+it asks for:
+
+  addr          host[:port] — port defaults to 22
+  user          login user
+  identityFile  optional path to a private key (~/.ssh/id_ed25519, etc.)
+  passwordCmd   optional shell command whose stdout is the password
+                (e.g. "security find-generic-password -s tn-host -w",
+                "pass show ssh/host", "op read 'op://Vault/Item/password'").
+                tn never writes the password to disk; it just records
+                the command.
+
+Re-running "tn init <name>" with the same alias edits the existing
+entry rather than wiping it. The first host configured becomes the
+defaultHost.
+
+Configuration lives in $TN_HOME/config.yaml (default ~/.tn/config.yaml)
+with mode 0600. You can also edit the YAML by hand; the schema is in
+the README under "Config".`,
+	Example: `  tn init prod
+  tn init             # → alias "default"`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := config.Load()
 		if err != nil {

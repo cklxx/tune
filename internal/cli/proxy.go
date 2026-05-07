@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -24,6 +25,10 @@ var (
 	proxyReconnect bool
 )
 
+// proxyEnvPath is the absolute path of proxy.env on the remote, written when
+// --write-env is set. Kept here so the cleanup path uses the same string.
+const proxyEnvPath = ".tn/proxy.env"
+
 var proxyCmd = &cobra.Command{
 	Use:   "proxy",
 	Short: "Run a reverse SOCKS5 proxy on the remote, served by the local network",
@@ -41,11 +46,17 @@ In another shell on the remote, set:
 Then pip/npm/curl/git/apt-get https traffic will egress from your local box.
 
 With --write-env, an env-file is dropped at $HOME/.tn/proxy.env on the remote,
-which "tn exec --proxy" sources automatically.
+which "tn exec --proxy" sources automatically. The file is removed when this
+command exits cleanly so a stale env file doesn't trick later "tn exec --proxy"
+runs into pointing at a dead listener.
 
 With --reconnect (default), the proxy auto-reopens the SSH connection on
-transient failures with exponential backoff, capped at 30s. This makes
-"tn proxy" resilient to flaky networks where SSH might briefly drop.`,
+*transient* failures (network drops, SSH session killed). Configuration
+errors — e.g. the remote port already being in use — exit immediately
+without retrying.`,
+	Example: `  tn proxy                          # remote listens on 127.0.0.1:1080
+  tn proxy -p 0                     # auto-pick a free port (good for shared hosts)
+  tn proxy -p 8443 --write-env=false`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := config.Load()
 		if err != nil {
@@ -55,10 +66,7 @@ transient failures with exponential backoff, capped at 30s. This makes
 		if err != nil {
 			return err
 		}
-		policy := sshx.PolicyTOFU
-		if flagInsecure {
-			policy = sshx.PolicyInsecure
-		}
+		policy := currentPolicy()
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -78,7 +86,7 @@ transient failures with exponential backoff, capped at 30s. This makes
 			if ctx.Err() != nil {
 				return nil
 			}
-			if !proxyReconnect {
+			if !proxyReconnect || isPermanentProxyError(err) {
 				return err
 			}
 			if err != nil {
@@ -97,6 +105,19 @@ transient failures with exponential backoff, capped at 30s. This makes
 	},
 }
 
+// isPermanentProxyError tells the reconnect loop to give up. Anything that
+// won't fix itself by waiting (port-in-use, auth failure) goes here.
+func isPermanentProxyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "tcpip-forward request denied") ||
+		strings.Contains(msg, "auth failed") ||
+		strings.Contains(msg, "GSSAPI/Kerberos") ||
+		strings.Contains(msg, "HOST KEY MISMATCH")
+}
+
 // runProxyOnce dials the host, opens a remote listener, serves SOCKS5 over
 // it, and returns when the listener errors or ctx is cancelled. Caller is
 // responsible for the reconnect loop.
@@ -112,25 +133,41 @@ func runProxyOnce(ctx context.Context, host *config.Host, policy sshx.HostKeyPol
 	addr := net.JoinHostPort(proxyBind, strconv.Itoa(proxyPort))
 	l, err := c.SSH().Listen("tcp", addr)
 	if err != nil {
-		return fmt.Errorf("remote listen %s: %w", addr, err)
+		return wrapListenErr(addr, err)
 	}
 	defer l.Close()
 
 	_, listenPort, _ := net.SplitHostPort(l.Addr().String())
 
 	if proxyWrite {
-		fc, err := newSFTP(c)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "tn proxy: skipping --write-env: %v\n", err)
+		fc, ferr := newSFTP(c)
+		if ferr != nil {
+			fmt.Fprintf(os.Stderr, "tn proxy: skipping --write-env: %v\n", ferr)
 		} else {
-			envBody := fmt.Sprintf("export ALL_PROXY=socks5h://127.0.0.1:%s\nexport HTTP_PROXY=socks5h://127.0.0.1:%s\nexport HTTPS_PROXY=socks5h://127.0.0.1:%s\nexport NO_PROXY=localhost,127.0.0.1\n",
-				listenPort, listenPort, listenPort)
+			envBody := fmt.Sprintf(`# written by tn proxy — removed automatically when tn proxy exits
+# tn-proxy-port=%s
+export ALL_PROXY=socks5h://127.0.0.1:%s
+export HTTP_PROXY=socks5h://127.0.0.1:%s
+export HTTPS_PROXY=socks5h://127.0.0.1:%s
+export NO_PROXY=localhost,127.0.0.1
+`, listenPort, listenPort, listenPort, listenPort)
 			if err := fc.MkdirAll(".tn"); err != nil {
 				fmt.Fprintf(os.Stderr, "tn proxy: mkdir ~/.tn on remote: %v\n", err)
 			}
-			if err := writeFile(fc, ".tn/proxy.env", strings.NewReader(envBody)); err != nil {
+			if err := writeFile(fc, proxyEnvPath, strings.NewReader(envBody)); err != nil {
 				fmt.Fprintf(os.Stderr, "tn proxy: write proxy.env: %v\n", err)
 			}
+			// Best-effort cleanup so the next agent invocation doesn't read
+			// stale data. We use a fresh sftp client because the original
+			// might already be closed by the deferred c.Close().
+			defer func() {
+				cleanup, cerr := newSFTP(c)
+				if cerr != nil {
+					return
+				}
+				_ = cleanup.Remove(proxyEnvPath)
+				cleanup.Close()
+			}()
 			fc.Close()
 		}
 	}
@@ -151,6 +188,28 @@ func runProxyOnce(ctx context.Context, host *config.Host, policy sshx.HostKeyPol
 
 	return socks.Serve(l, nil)
 }
+
+// wrapListenErr translates the cryptic "ssh: tcpip-forward request denied by
+// peer" into something agent-readable when we can guess why.
+func wrapListenErr(addr string, err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "tcpip-forward request denied") {
+		_, port, _ := net.SplitHostPort(addr)
+		if port == "0" {
+			// Auto-pick was rejected — server-wide forwarding is off.
+			return fmt.Errorf("remote rejected tcpip-forward — sshd may have AllowTcpForwarding=no or DisableForwarding=yes (%w)", err)
+		}
+		return fmt.Errorf("remote rejected tcpip-forward on %s — port %s likely already in use; try `-p 0` to auto-pick a free port (%w)", addr, port, err)
+	}
+	return fmt.Errorf("remote listen %s: %w", addr, err)
+}
+
+// errProxyListenDenied is exposed for tests that want to assert the
+// classifier triggers.
+var errProxyListenDenied = errors.New("tcpip-forward request denied")
 
 func init() {
 	proxyCmd.Flags().IntVarP(&proxyPort, "port", "p", 1080, "remote port to listen on (0 = pick free)")

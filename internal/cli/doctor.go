@@ -35,10 +35,7 @@ Exits non-zero if any host failed.`,
 		if len(cfg.Hosts) == 0 {
 			return fmt.Errorf("no hosts configured (try `tn init`)")
 		}
-		policy := sshx.PolicyTOFU
-		if flagInsecure {
-			policy = sshx.PolicyInsecure
-		}
+		policy := currentPolicy()
 
 		names := make([]string, 0, len(cfg.Hosts))
 		for n := range cfg.Hosts {

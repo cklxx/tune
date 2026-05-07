@@ -16,7 +16,19 @@ import (
 var pushCmd = &cobra.Command{
 	Use:   "push <local> <remote>",
 	Short: "Upload a file or directory to the remote",
-	Args:  cobra.ExactArgs(2),
+	Long: `Copies <local> to <remote> over SFTP. If <local> is a directory the
+copy is recursive: directories are mkdir-p'd, regular files are streamed,
+and each file's mode bits are preserved (mtime is not).
+
+Symlinks are NOT followed and not recreated; they are skipped silently.
+Existing files at the destination are overwritten without prompt.
+
+On any error the command exits non-zero and stops at the first failure —
+files copied before the failure remain on the remote (no rollback).`,
+	Example: `  tn push ./build/app.tar.gz /srv/releases/
+  tn push ./src /srv/app/src           # recursive
+  tn push secrets.env /etc/myapp/.env  # single file rename`,
+	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		c, _, err := connect()
 		if err != nil {
@@ -35,7 +47,16 @@ var pushCmd = &cobra.Command{
 var pullCmd = &cobra.Command{
 	Use:   "pull <remote> <local>",
 	Short: "Download a file or directory from the remote",
-	Args:  cobra.ExactArgs(2),
+	Long: `Mirror of "tn push": copies <remote> down to <local>, recursing into
+directories. File mode bits are preserved. Symlinks on the remote are
+skipped. Existing local files are overwritten.
+
+For repeated reads of the same tree (grep, IDE, LSP), prefer "tn mirror"
+which only re-pulls files whose (size, mtime) changed.`,
+	Example: `  tn pull /var/log/app.log ./logs/
+  tn pull /srv/app/build ./local-build
+  tn pull /etc/nginx ./nginx-snapshot`,
+	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		c, _, err := connect()
 		if err != nil {
@@ -54,8 +75,18 @@ var pullCmd = &cobra.Command{
 var readCmd = &cobra.Command{
 	Use:   "read <remote>",
 	Short: "Print the contents of a remote file to stdout",
-	Long: `Streams the named file to stdout. Designed for coding agents that
-want to fetch a remote source file inline; use --json for a structured wrapper.`,
+	Long: `Streams the named file to stdout, byte-for-byte. No newline is added.
+Designed for coding agents and shell pipelines:
+
+    tn read /etc/hostname           # plain
+    tn read --json /etc/passwd      # {"path","size","mode","content"}
+
+The plain mode does no copy/transform — it's "cat over SSH". On error
+(file missing, permission denied, etc.) tn exits non-zero and prints the
+underlying SFTP error to stderr; nothing is written to stdout.`,
+	Example: `  tn read /etc/hostname
+  diff <(tn read /etc/nginx/nginx.conf) ./nginx.conf
+  tn read /var/log/app.log | grep ERROR | head`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		c, _, err := connect()
@@ -75,7 +106,21 @@ want to fetch a remote source file inline; use --json for a structured wrapper.`
 var writeCmd = &cobra.Command{
 	Use:   "write <remote>",
 	Short: "Write stdin to a remote file (atomic via tmp + rename)",
-	Args:  cobra.ExactArgs(1),
+	Long: `Streams stdin to <remote>. The write is atomic: bytes go to
+<remote>.tn-tmp first, then posix-rename swaps it into place, so a
+concurrent reader either sees the old file or the new one — never a
+half-written one.
+
+The destination directory is mkdir-p'd if it doesn't exist. The new file
+ends up with mode 0644 by default (the remote umask may further restrict
+it). To set a specific mode, follow up with "tn exec -- chmod NNN /path".
+
+If you don't redirect anything into stdin, tn waits forever — pipe
+something in or use < /dev/null for an empty file.`,
+	Example: `  echo "FOO=bar" | tn write /etc/myapp/env
+  tar -cz ./code | tn write /tmp/code.tar.gz
+  tn write /tmp/empty < /dev/null`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		c, _, err := connect()
 		if err != nil {
@@ -96,7 +141,20 @@ var lsLong bool
 var lsCmd = &cobra.Command{
 	Use:   "ls [remote-path]",
 	Short: "List a remote directory",
-	Args:  cobra.MaximumNArgs(1),
+	Long: `Lists entries in <remote-path> (defaults to the SSH login dir, usually
+$HOME). Directories are suffixed with "/" in the default output. Use -l
+for a long listing (mode, uid, gid, size, mtime, name) or --json for
+structured output with size, mode (octal), uid, gid, mtime (unix epoch
+seconds), isDir, and name.
+
+UID/GID are returned as numbers — there is no remote /etc/passwd lookup
+(would cost an extra round trip per call). To resolve them to names,
+pipe through "tn exec -- getent passwd UID" or do the lookup locally.`,
+	Example: `  tn ls                        # $HOME on remote
+  tn ls /var/log
+  tn ls -l /etc/nginx
+  tn ls --json /srv | jq '.[] | select(.isDir)'`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		path := "."
 		if len(args) == 1 {
@@ -191,18 +249,22 @@ func list(fc *sftp.Client, path string, out io.Writer) error {
 			Name  string `json:"name"`
 			Size  int64  `json:"size"`
 			Mode  string `json:"mode"`
+			UID   uint32 `json:"uid"`
+			GID   uint32 `json:"gid"`
 			Mtime int64  `json:"mtime"`
 			IsDir bool   `json:"isDir"`
 		}
 		rows := make([]row, 0, len(entries))
 		for _, e := range entries {
-			rows = append(rows, row{e.Name(), e.Size(), fmt.Sprintf("%#o", e.Mode().Perm()), e.ModTime().Unix(), e.IsDir()})
+			uid, gid := uidGid(e)
+			rows = append(rows, row{e.Name(), e.Size(), fmt.Sprintf("%#o", e.Mode().Perm()), uid, gid, e.ModTime().Unix(), e.IsDir()})
 		}
 		return json.NewEncoder(out).Encode(rows)
 	}
 	for _, e := range entries {
 		if lsLong {
-			fmt.Fprintf(out, "%s %10d %s %s\n", e.Mode(), e.Size(), e.ModTime().Format("2006-01-02 15:04"), e.Name())
+			uid, gid := uidGid(e)
+			fmt.Fprintf(out, "%s %5d %5d %10d %s %s\n", e.Mode(), uid, gid, e.Size(), e.ModTime().Format("2006-01-02 15:04"), e.Name())
 		} else {
 			name := e.Name()
 			if e.IsDir() {
@@ -212,6 +274,15 @@ func list(fc *sftp.Client, path string, out io.Writer) error {
 		}
 	}
 	return nil
+}
+
+// uidGid pulls the SFTP UID/GID out of a FileInfo. Returns (0, 0) if the
+// underlying server didn't send them (extremely rare; standard sshd does).
+func uidGid(fi os.FileInfo) (uint32, uint32) {
+	if st, ok := fi.Sys().(*sftp.FileStat); ok && st != nil {
+		return st.UID, st.GID
+	}
+	return 0, 0
 }
 
 // push copies local (file or dir) to remote.

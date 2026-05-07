@@ -13,19 +13,36 @@ import (
 	"github.com/cklxx/tune/internal/config"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
+	"golang.org/x/term"
 )
 
 // HostKeyPolicy controls what happens on an unknown host key.
 type HostKeyPolicy int
 
 const (
-	// PolicyTOFU prompts the user once on first sight, then pins.
+	// PolicyTOFU prompts the user once on first sight, then pins. With no
+	// TTY available, returns ErrHostKeyNoTTY rather than blocking forever
+	// or accepting silently.
 	PolicyTOFU HostKeyPolicy = iota
 	// PolicyStrict refuses any unknown host.
 	PolicyStrict
-	// PolicyInsecure accepts any host key. Use only for tests.
+	// PolicyInsecure accepts any host key. Use only for tests / ad-hoc.
 	PolicyInsecure
+	// PolicyAcceptNew pins on first sight without prompting. Mismatches on
+	// already-known hosts are still fatal. Mirrors OpenSSH's
+	// StrictHostKeyChecking=accept-new.
+	PolicyAcceptNew
 )
+
+// ErrHostKeyNoTTY is returned by the host-key callback under PolicyTOFU when
+// the host is unknown and there is no terminal to prompt on. Distinguished
+// from a network EOF so the handshake error classifier can produce an
+// actionable message instead of "wrong port".
+var ErrHostKeyNoTTY = errors.New("unknown host key and stdin is not a terminal")
+
+// ErrHostKeyRejected is returned when the user (or the strict policy)
+// refuses to trust an unknown host.
+var ErrHostKeyRejected = errors.New("host key rejected")
 
 // HostKeyCallback returns a callback that consults the given known_hosts file
 // (creating it if missing) and applies the policy on unknown keys. Concurrent
@@ -68,17 +85,26 @@ func HostKeyCallback(path string, policy HostKeyPolicy) (ssh.HostKeyCallback, er
 					hostname, key.Type(), ssh.FingerprintSHA256(key), len(keyErr.Want))
 			}
 			// Unknown — apply policy.
-			if policy == PolicyStrict {
-				return fmt.Errorf("unknown host %s (%s %s)", hostname, key.Type(), ssh.FingerprintSHA256(key))
+			switch policy {
+			case PolicyStrict:
+				return fmt.Errorf("%w: unknown host %s (%s %s) under strict policy",
+					ErrHostKeyRejected, hostname, key.Type(), ssh.FingerprintSHA256(key))
+			case PolicyAcceptNew:
+				return appendKnownHost(path, hostname, key)
+			case PolicyTOFU:
+				if !term.IsTerminal(int(os.Stdin.Fd())) {
+					return fmt.Errorf("%w for %s (%s %s) — re-run with --accept-new to pin without prompting, --insecure-host-key to skip verification, or pre-populate %s",
+						ErrHostKeyNoTTY, hostname, key.Type(), ssh.FingerprintSHA256(key), path)
+				}
+				ok, perr := promptTrust(hostname, key)
+				if perr != nil {
+					return perr
+				}
+				if !ok {
+					return fmt.Errorf("%w for %s by user", ErrHostKeyRejected, hostname)
+				}
+				return appendKnownHost(path, hostname, key)
 			}
-			ok, perr := promptTrust(hostname, key)
-			if perr != nil {
-				return perr
-			}
-			if !ok {
-				return fmt.Errorf("host %s rejected by user", hostname)
-			}
-			return appendKnownHost(path, hostname, key)
 		}
 		return err
 	}, nil

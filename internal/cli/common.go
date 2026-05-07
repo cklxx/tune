@@ -16,6 +16,7 @@ var (
 	flagHost      string
 	flagJSON      bool
 	flagInsecure  bool
+	flagAcceptNew bool
 	flagTimeout   time.Duration
 )
 
@@ -23,7 +24,20 @@ func registerCommonFlags(cmd *cobra.Command) {
 	cmd.PersistentFlags().StringVarP(&flagHost, "host", "H", "", "host alias from config (overrides $TN_HOST and defaultHost)")
 	cmd.PersistentFlags().BoolVar(&flagJSON, "json", false, "machine-readable JSON output where supported")
 	cmd.PersistentFlags().BoolVar(&flagInsecure, "insecure-host-key", false, "accept any host key (DANGEROUS — for ad-hoc/testing only)")
+	cmd.PersistentFlags().BoolVar(&flagAcceptNew, "accept-new", false, "pin host key on first sight without prompting (mismatches still fatal); also reads $TN_ACCEPT_NEW_HOSTKEYS=1")
 	cmd.PersistentFlags().DurationVar(&flagTimeout, "timeout", 30*time.Second, "dial timeout")
+}
+
+// currentPolicy resolves the host-key policy from flags + env. Insecure
+// wins (it's the most explicit), then accept-new, otherwise TOFU.
+func currentPolicy() sshx.HostKeyPolicy {
+	if flagInsecure {
+		return sshx.PolicyInsecure
+	}
+	if flagAcceptNew || os.Getenv("TN_ACCEPT_NEW_HOSTKEYS") == "1" {
+		return sshx.PolicyAcceptNew
+	}
+	return sshx.PolicyTOFU
 }
 
 // connect resolves a host from config and dials it. The returned client must
@@ -37,13 +51,9 @@ func connect() (*sshx.Client, *config.Host, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	policy := sshx.PolicyTOFU
-	if flagInsecure {
-		policy = sshx.PolicyInsecure
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), flagTimeout)
 	defer cancel()
-	c, err := sshx.Dial(ctx, host, policy)
+	c, err := sshx.Dial(ctx, host, currentPolicy())
 	if err != nil {
 		return nil, host, err
 	}
@@ -66,4 +76,3 @@ func die(err error) {
 	fmt.Fprintln(os.Stderr, "tn:", err)
 	os.Exit(1)
 }
-

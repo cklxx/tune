@@ -14,6 +14,17 @@ import (
 var shellCmd = &cobra.Command{
 	Use:   "shell",
 	Short: "Open an interactive PTY shell on the remote",
+	Long: `Opens an interactive shell on the remote with a PTY allocated, like
+"ssh user@host" with no command. SIGWINCH (window-resize) is forwarded
+to the remote so vim, htop, etc. lay out correctly when you resize the
+terminal. The TERM env from your local session is propagated; if it's
+empty, tn falls back to "xterm-256color".
+
+Refuses to run if stdin is not a TTY — for non-interactive runs use
+"tn exec". On exit the remote shell's exit status is returned to your
+local shell.`,
+	Example: `  tn shell
+  tn shell -H prod`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		c, _, err := connect()
 		if err != nil {

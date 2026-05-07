@@ -71,9 +71,10 @@ func runExec(c *sshx.Client, args, env []string, cwd string, proxy bool) error {
 		prefix += "export " + envEscape(kv) + "; "
 	}
 	if proxy {
-		// Best-effort: read $TN_PROXY_PORT from the remote env (set by `tn
-		// proxy`'s status file). Falls back to 1080.
-		prefix += "if [ -f \"$HOME/.tn/proxy.env\" ]; then . \"$HOME/.tn/proxy.env\"; fi; "
+		// Source ~/.tn/proxy.env (written by `tn proxy`), but first verify
+		// the listener is alive — a stale env file from a crashed `tn
+		// proxy` would otherwise silently route through nothing.
+		prefix += proxyEnvPrefix
 	}
 
 	sess.Stdout = os.Stdout
@@ -109,6 +110,30 @@ func runExec(c *sshx.Client, args, env []string, cwd string, proxy bool) error {
 	}
 	return err
 }
+
+// proxyEnvPrefix is shell injected before the user's command when --proxy is
+// set. It reads ~/.tn/proxy.env (dropped by `tn proxy --write-env`), parses
+// the listen port out of the marker comment, probes that port via bash's
+// /dev/tcp pseudo-device, and only then sources the env. If the listener is
+// dead or the file is missing it prints a one-line error and exits with
+// status 2 so the caller can distinguish from the inner command's exit code.
+//
+// We use a heredoc-free composition because the whole command is itself
+// shell-quoted by the calling shell on the remote.
+const proxyEnvPrefix = `__tn_env="$HOME/.tn/proxy.env"; ` +
+	`if [ -f "$__tn_env" ]; then ` +
+	`__tn_port=$(awk -F= '/^# tn-proxy-port=/ {print $2; exit}' "$__tn_env"); ` +
+	`if [ -z "$__tn_port" ]; then __tn_port=$(awk -F: '/socks5h:\/\/127\.0\.0\.1:/ {sub(/.*127\.0\.0\.1:/,""); sub(/[^0-9].*/,""); print; exit}' "$__tn_env"); fi; ` +
+	`if [ -n "$__tn_port" ] && (exec 3<>/dev/tcp/127.0.0.1/$__tn_port) 2>/dev/null; then ` +
+	`exec 3<&- 3>&-; . "$__tn_env"; ` +
+	`else ` +
+	`echo "tn exec --proxy: stale or dead proxy.env (no listener on port $__tn_port) — start 'tn proxy' first" 1>&2; ` +
+	`exit 2; ` +
+	`fi; ` +
+	`else ` +
+	`echo "tn exec --proxy: no ~/.tn/proxy.env on remote — start 'tn proxy' first" 1>&2; ` +
+	`exit 2; ` +
+	`fi; `
 
 // joinShell produces a single shell command string from argv. If a single arg
 // is given it's passed through (so "tn exec -- 'ls | head'" works); otherwise

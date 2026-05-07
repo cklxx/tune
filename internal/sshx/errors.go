@@ -43,6 +43,26 @@ func classifyHandshakeError(addr string, err error) error {
 	}
 	msg := err.Error()
 
+	// Our own host-key errors come back through here wrapped in the
+	// handshake error. Surface them as-is without the misleading
+	// "wrong port (non-SSH service)" hint that the bare-EOF check below
+	// would produce.
+	if errors.Is(err, ErrHostKeyNoTTY) || errors.Is(err, ErrHostKeyRejected) {
+		return fmt.Errorf("ssh %s: %w", addr, err)
+	}
+	if strings.Contains(msg, "HOST KEY MISMATCH") {
+		return err
+	}
+
+	// gssapi-with-mic is the canonical Kerberos auth method on most
+	// corporate jump hosts (ByteDance, Google, etc). x/crypto/ssh has no
+	// GSSAPI support, so if it's the only method the server offers we
+	// have to bail with an actionable message.
+	if strings.Contains(msg, "gssapi-with-mic") &&
+		(strings.Contains(msg, "no supported methods remain") || strings.Contains(msg, "unable to authenticate")) {
+		return fmt.Errorf("ssh %s: server requires GSSAPI/Kerberos auth which tn does not support — use the system ssh to open a tunnel and point tn at the local port (see README \"Behind a Kerberos jump host\") (%w)", addr, err)
+	}
+
 	switch {
 	case errors.Is(err, io.EOF):
 		return fmt.Errorf("ssh %s: server closed the connection during handshake — wrong port (talking to a non-SSH service)? (%w)", addr, err)
@@ -50,9 +70,6 @@ func classifyHandshakeError(addr string, err error) error {
 		return fmt.Errorf("ssh %s: auth failed — wrong password/key, or key not in authorized_keys (try `tn upload-key` after a password connect) (%w)", addr, err)
 	case strings.Contains(msg, "ssh: handshake failed"), strings.Contains(msg, "protocol version"):
 		return fmt.Errorf("ssh %s: handshake failed — server might not be sshd (%w)", addr, err)
-	case strings.Contains(msg, "HOST KEY MISMATCH"):
-		// Already friendly.
-		return err
 	}
 	return fmt.Errorf("ssh %s: %w", addr, err)
 }
