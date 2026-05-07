@@ -172,10 +172,10 @@ network works.
 
 ## Behind a Kerberos / GSSAPI jump host
 
-Some corporate jump hosts (ByteDance's `jumpecs-hl.byted.org`, Google
-`relay.corp`, etc.) require `gssapi-with-mic` — Kerberos auth — and
-reject everything else. `golang.org/x/crypto/ssh` doesn't implement
-GSSAPI, so `tn` cannot dial these jumps directly.
+Some corporate jump hosts (Kerberos-protected internal jumpboxes that
+require `gssapi-with-mic`) reject everything else.
+`golang.org/x/crypto/ssh` doesn't implement GSSAPI, so `tn` cannot dial
+these jumps directly.
 
 The escape hatch is to let your system `ssh` (which has GSSAPI) handle
 the jump as a TCP forward, and point `tn` at the resulting local port:
