@@ -33,10 +33,17 @@ Examples:
 
 With --proxy, sets HTTP_PROXY/HTTPS_PROXY/ALL_PROXY for the command — useful
 to make package managers go through the local network. Requires "tn proxy"
-to be running in another shell.`,
+to be running in another shell.
+
+If "tn hold" is running for the host, the dial is skipped and the command
+runs over the held connection (see "tn hold --help").`,
 	Args:               cobra.MinimumNArgs(1),
 	DisableFlagParsing: false,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		req := holdRequest{Op: "exec", Args: args, Env: execEnv, Cwd: execCwd, Proxy: execProxy}
+		if code, ok, err := tryHeld(req, os.Stdin, os.Stdout, os.Stderr); ok {
+			return heldResult(code, err)
+		}
 		c, _, err := connect()
 		if err != nil {
 			return err
@@ -52,17 +59,10 @@ func init() {
 	execCmd.Flags().StringVar(&execCwd, "cwd", "", "working directory on the remote")
 }
 
-// runExec executes args as a single shell command on the remote, piping
-// local stdio. Returns the same exit code the remote process exited with.
-func runExec(c *sshx.Client, args, env []string, cwd string, proxy bool) error {
-	sess, err := c.SSH().NewSession()
-	if err != nil {
-		return err
-	}
-	defer sess.Close()
-
-	// Compose the command.
-	cmdline := joinShell(args)
+// buildExecCommand composes the final remote shell command from argv plus
+// the --cwd/--env/--proxy modifiers. Shared by the direct path and the hold
+// daemon so both run byte-identical command lines.
+func buildExecCommand(args, env []string, cwd string, proxy bool) string {
 	prefix := ""
 	if cwd != "" {
 		prefix += fmt.Sprintf("cd %s && ", shQuote(cwd))
@@ -76,6 +76,34 @@ func runExec(c *sshx.Client, args, env []string, cwd string, proxy bool) error {
 		// proxy` would otherwise silently route through nothing.
 		prefix += proxyEnvPrefix
 	}
+	return prefix + joinShell(args)
+}
+
+// exitCodeOf maps a session Run error to (remote exit code, remaining
+// error). A remote nonzero exit is a code, not an error; EOF on a clean
+// channel teardown counts as success.
+func exitCodeOf(err error) (int, error) {
+	if err == nil {
+		return 0, nil
+	}
+	var ee *ssh.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitStatus(), nil
+	}
+	if errors.Is(err, io.EOF) {
+		return 0, nil
+	}
+	return 0, err
+}
+
+// runExec executes args as a single shell command on the remote, piping
+// local stdio. Returns the same exit code the remote process exited with.
+func runExec(c *sshx.Client, args, env []string, cwd string, proxy bool) error {
+	sess, err := c.SSH().NewSession()
+	if err != nil {
+		return err
+	}
+	defer sess.Close()
 
 	sess.Stdout = os.Stdout
 	sess.Stderr = os.Stderr
@@ -97,18 +125,14 @@ func runExec(c *sshx.Client, args, env []string, cwd string, proxy bool) error {
 		}
 	}()
 
-	err = sess.Run(prefix + cmdline)
-	if err == nil {
-		return nil
+	code, err := exitCodeOf(sess.Run(buildExecCommand(args, env, cwd, proxy)))
+	if err != nil {
+		return err
 	}
-	var ee *ssh.ExitError
-	if errors.As(err, &ee) {
-		os.Exit(ee.ExitStatus())
+	if code != 0 {
+		os.Exit(code)
 	}
-	if errors.Is(err, io.EOF) {
-		return nil
-	}
-	return err
+	return nil
 }
 
 // proxyEnvPrefix is shell injected before the user's command when --proxy is

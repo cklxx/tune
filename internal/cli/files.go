@@ -30,6 +30,11 @@ files copied before the failure remain on the remote (no rollback).`,
   tn push secrets.env /etc/myapp/.env  # single file rename`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if local, err := filepath.Abs(args[0]); err == nil {
+			if code, ok, err := tryHeld(holdRequest{Op: "push", Local: local, Remote: args[1]}, nil, os.Stdout, os.Stderr); ok {
+				return heldResult(code, err)
+			}
+		}
 		c, _, err := connect()
 		if err != nil {
 			return err
@@ -58,6 +63,11 @@ which only re-pulls files whose (size, mtime) changed.`,
   tn pull /etc/nginx ./nginx-snapshot`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if local, err := filepath.Abs(args[1]); err == nil {
+			if code, ok, err := tryHeld(holdRequest{Op: "pull", Remote: args[0], Local: local}, nil, os.Stdout, os.Stderr); ok {
+				return heldResult(code, err)
+			}
+		}
 		c, _, err := connect()
 		if err != nil {
 			return err
@@ -89,6 +99,9 @@ underlying SFTP error to stderr; nothing is written to stdout.`,
   tn read /var/log/app.log | grep ERROR | head`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if code, ok, err := tryHeld(holdRequest{Op: "read", Path: args[0], JSON: flagJSON}, nil, cmd.OutOrStdout(), os.Stderr); ok {
+			return heldResult(code, err)
+		}
 		c, _, err := connect()
 		if err != nil {
 			return err
@@ -99,7 +112,7 @@ underlying SFTP error to stderr; nothing is written to stdout.`,
 			return err
 		}
 		defer fc.Close()
-		return readFile(fc, args[0], cmd.OutOrStdout())
+		return readFile(fc, args[0], cmd.OutOrStdout(), flagJSON)
 	},
 }
 
@@ -122,6 +135,9 @@ something in or use < /dev/null for an empty file.`,
   tn write /tmp/empty < /dev/null`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if code, ok, err := tryHeld(holdRequest{Op: "write", Path: args[0]}, os.Stdin, os.Stdout, os.Stderr); ok {
+			return heldResult(code, err)
+		}
 		c, _, err := connect()
 		if err != nil {
 			return err
@@ -160,6 +176,9 @@ pipe through "tn exec -- getent passwd UID" or do the lookup locally.`,
 		if len(args) == 1 {
 			path = args[0]
 		}
+		if code, ok, err := tryHeld(holdRequest{Op: "ls", Path: path, Long: lsLong, JSON: flagJSON}, nil, cmd.OutOrStdout(), os.Stderr); ok {
+			return heldResult(code, err)
+		}
 		c, _, err := connect()
 		if err != nil {
 			return err
@@ -170,7 +189,7 @@ pipe through "tn exec -- getent passwd UID" or do the lookup locally.`,
 			return err
 		}
 		defer fc.Close()
-		return list(fc, path, cmd.OutOrStdout())
+		return list(fc, path, cmd.OutOrStdout(), lsLong, flagJSON)
 	},
 }
 
@@ -178,14 +197,14 @@ func init() {
 	lsCmd.Flags().BoolVarP(&lsLong, "long", "l", false, "long format with size and mtime")
 }
 
-// readFile streams remote file to w. With --json, wraps in a frame.
-func readFile(fc *sftp.Client, path string, w io.Writer) error {
+// readFile streams remote file to w. With asJSON, wraps in a frame.
+func readFile(fc *sftp.Client, path string, w io.Writer, asJSON bool) error {
 	f, err := fc.Open(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	if !flagJSON {
+	if !asJSON {
 		_, err := io.Copy(w, f)
 		return err
 	}
@@ -239,12 +258,12 @@ func writeFile(fc *sftp.Client, path string, src io.Reader) error {
 }
 
 // list emits a directory listing. JSON mode is structured.
-func list(fc *sftp.Client, path string, out io.Writer) error {
+func list(fc *sftp.Client, path string, out io.Writer, long, asJSON bool) error {
 	entries, err := fc.ReadDir(path)
 	if err != nil {
 		return err
 	}
-	if flagJSON {
+	if asJSON {
 		type row struct {
 			Name  string `json:"name"`
 			Size  int64  `json:"size"`
@@ -262,7 +281,7 @@ func list(fc *sftp.Client, path string, out io.Writer) error {
 		return json.NewEncoder(out).Encode(rows)
 	}
 	for _, e := range entries {
-		if lsLong {
+		if long {
 			uid, gid := uidGid(e)
 			fmt.Fprintf(out, "%s %5d %5d %10d %s %s\n", e.Mode(), uid, gid, e.Size(), e.ModTime().Format("2006-01-02 15:04"), e.Name())
 		} else {

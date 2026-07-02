@@ -159,8 +159,7 @@ func TestReadFilePlainAndJSON(t *testing.T) {
 
 	var buf bytes.Buffer
 
-	flagJSON = false
-	if err := readFile(fc, "greet.txt", &buf); err != nil {
+	if err := readFile(fc, "greet.txt", &buf, false); err != nil {
 		t.Fatal(err)
 	}
 	if buf.String() != "hi tn" {
@@ -168,9 +167,7 @@ func TestReadFilePlainAndJSON(t *testing.T) {
 	}
 
 	buf.Reset()
-	flagJSON = true
-	t.Cleanup(func() { flagJSON = false })
-	if err := readFile(fc, "greet.txt", &buf); err != nil {
+	if err := readFile(fc, "greet.txt", &buf, true); err != nil {
 		t.Fatal(err)
 	}
 	var got struct {
@@ -198,8 +195,7 @@ func TestList(t *testing.T) {
 	fc := dialSFTP(t, root)
 
 	var buf bytes.Buffer
-	flagJSON = false
-	if err := list(fc, ".", &buf); err != nil {
+	if err := list(fc, ".", &buf, false, false); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
@@ -210,9 +206,7 @@ func TestList(t *testing.T) {
 	}
 
 	buf.Reset()
-	flagJSON = true
-	t.Cleanup(func() { flagJSON = false })
-	if err := list(fc, ".", &buf); err != nil {
+	if err := list(fc, ".", &buf, false, true); err != nil {
 		t.Fatal(err)
 	}
 	var rows []struct {

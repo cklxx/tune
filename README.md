@@ -32,6 +32,20 @@ It's not (yet) a Mutagen-class bidirectional sync tool. For "an agent or
 human shells out to a remote box, reads/writes some files, runs some
 commands, maybe installs a package," it slots in cleanly.
 
+## Hold: skip the dial
+
+Every `tn` invocation normally dials jump + target fresh. `tn hold -H <host>`
+dials once, detaches, and serves the connection over a Unix socket
+(`~/.tn/hold-<host>.sock`, 0600). While it runs, `exec` / `read` / `write` /
+`ls` / `push` / `pull` attach instead of dialing — same output, same exit
+codes. Idle timeout 30m (`--idle`), `--stop` to end it, `tn status` shows
+`held: true`. Measured against a jumpboxed pod: 1.82s → 0.40s per `tn exec`.
+
+```sh
+$ tn hold -H prod        # once
+$ tn exec -H prod -- ls  # every call now ~4.5x faster
+```
+
 ## Quick start
 
 ```sh

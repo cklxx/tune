@@ -27,13 +27,13 @@ var benchCmd = &cobra.Command{
   1. Cold dial cost (TCP + SSH handshake, including jump if any).
   2. RTT distribution over N keepalive global requests.
   3. Time to start + run a no-op shell command N times (a useful proxy for
-     the per-call cost of "tn exec" without a daemon).
+     the per-call cost of "tn exec" without a held connection).
   4. Single-stream upload throughput by pumping --payload bytes from
      /dev/zero through "cat > /dev/null".
 
-The numbers tell you whether you need a daemon. Sub-100ms exec on a 50ms-RTT
-link is normal; if it's 500ms+ you have a network or auth-renegotiation
-problem.`,
+The numbers tell you whether "tn hold" is worth it on your link: dialMs is
+what every command pays cold; execMs is what it pays once held. bench
+always dials fresh — by design, so the cold cost stays measurable.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := config.Load()
 		if err != nil {

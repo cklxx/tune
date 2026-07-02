@@ -1,0 +1,489 @@
+package cli
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"time"
+
+	"github.com/cklxx/tune/internal/config"
+	"github.com/cklxx/tune/internal/sshx"
+	"github.com/pkg/sftp"
+	"github.com/spf13/cobra"
+	"golang.org/x/crypto/ssh"
+)
+
+var (
+	holdStop       bool
+	holdForeground bool
+	holdIdle       time.Duration
+)
+
+var holdCmd = &cobra.Command{
+	Use:   "hold",
+	Short: "Hold a persistent connection so other tn commands skip the dial",
+	Long: `Dials the host once, detaches into the background, and keeps the SSH
+connection open behind a Unix socket (~/.tn/hold-<host>.sock, mode 0600).
+While it runs, "tn exec", "tn read", "tn write", "tn ls", "tn push" and
+"tn pull" attach to the socket instead of dialing — the 400ms-1s dial
+drops to ~5ms per invocation. Nothing else changes: same output, same
+exit codes, same flags. Concurrent invocations multiplex safely over the
+one connection.
+
+Commands not routed through the hold (they dial directly, by design):
+"tn shell", "tn proxy", "tn mirror", "tn bench", "tn doctor",
+"tn upload-key". If no hold is running — or the daemon died, or the
+socket is stale — every command silently falls back to a direct dial,
+so holding is purely an optimization, never a requirement.
+
+The daemon exits on its own after --idle (default 30m) with no
+operations, when the SSH connection drops, or on "tn hold --stop". A
+stale socket left by a killed daemon is detected and cleaned up by the
+next tn command. Logs go to ~/.tn/hold-<host>.log.
+
+The background dial cannot prompt: it needs non-interactive auth
+(identityFile, agent, or passwordCmd) and an already-pinned host key.
+If "tn hold" fails, run "tn status" once — interactively — to pin the
+key and verify auth, then retry.`,
+	Example: `  tn hold                    # hold the default host
+  tn hold -H prod --idle 2h  # explicit host, longer idle timeout
+  tn status                  # shows held: true, dialMs: 0 (held)
+  tn hold --stop             # tear the held connection down`,
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if !holdSupported {
+			return errors.New("tn hold is not supported on this platform — commands dial directly")
+		}
+		cfg, err := config.Load()
+		if err != nil {
+			return err
+		}
+		host, err := cfg.Resolve(flagHost)
+		if err != nil {
+			return err
+		}
+		if holdStop {
+			return stopHold(host)
+		}
+		if hello, err := holdProbe(holdSocketPath(host.Name)); err == nil {
+			fmt.Printf("already holding %s (pid %d) — tn hold --stop to restart\n", host.Name, hello.Pid)
+			return nil
+		}
+		if holdForeground {
+			return runHoldDaemon(host)
+		}
+		return spawnHold(host)
+	},
+}
+
+func init() {
+	holdCmd.Flags().BoolVar(&holdStop, "stop", false, "stop the held connection for the host")
+	holdCmd.Flags().DurationVar(&holdIdle, "idle", 30*time.Minute, "shut down after this long without an operation")
+	holdCmd.Flags().BoolVar(&holdForeground, "foreground", false, "run the daemon in the foreground (used by the detach; handy for debugging)")
+}
+
+// holdSocketPath returns the per-host Unix socket path under $TN_HOME.
+func holdSocketPath(hostName string) string {
+	return filepath.Join(config.Home(), "hold-"+hostName+".sock")
+}
+
+func holdLogPath(hostName string) string {
+	return filepath.Join(config.Home(), "hold-"+hostName+".log")
+}
+
+// holdProbe connects to sock and reads the daemon's hello. A dead socket
+// (refused, not-a-socket, hung) is unlinked so the next hold can take over;
+// only "no such file" leaves the path alone.
+func holdProbe(sock string) (*holdHello, error) {
+	conn, hello, err := holdAttach(sock)
+	if err != nil {
+		return nil, err
+	}
+	conn.Close()
+	return hello, nil
+}
+
+// holdAttach dials sock and reads the hello frame, leaving the connection
+// open for a request. See holdProbe for stale-socket semantics.
+func holdAttach(sock string) (net.Conn, *holdHello, error) {
+	conn, err := net.DialTimeout("unix", sock, 500*time.Millisecond)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			_ = os.Remove(sock) // stale: daemon was SIGKILLed or is wedged
+		}
+		return nil, nil, err
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	t, payload, err := newFrameConn(conn).readFrame()
+	if err != nil || t != frameHello {
+		conn.Close()
+		return nil, nil, fmt.Errorf("hold socket %s: bad hello: %v", sock, err)
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+	hello := &holdHello{}
+	if err := json.Unmarshal(payload, hello); err != nil {
+		conn.Close()
+		return nil, nil, err
+	}
+	if hello.Version != holdProtoVersion {
+		conn.Close()
+		return nil, nil, fmt.Errorf("hold daemon speaks protocol v%d, this tn speaks v%d — tn hold --stop && tn hold", hello.Version, holdProtoVersion)
+	}
+	return conn, hello, nil
+}
+
+// stopHold asks a running daemon to shut down. Idempotent: a missing or
+// stale socket is reported (and cleaned) without error.
+func stopHold(host *config.Host) error {
+	sock := holdSocketPath(host.Name)
+	conn, hello, err := holdAttach(sock)
+	if err != nil {
+		fmt.Printf("no held connection for %s\n", host.Name)
+		return nil
+	}
+	defer conn.Close()
+	_, err = holdRoundTrip(newFrameConn(conn), holdRequest{Op: "stop"}, nil, io.Discard, io.Discard)
+	if err != nil {
+		return fmt.Errorf("stop hold: %w", err)
+	}
+	fmt.Printf("stopped hold for %s (pid %d)\n", host.Name, hello.Pid)
+	return nil
+}
+
+// runHoldDaemon dials the host and serves the hold socket until idle
+// timeout, --stop, SIGTERM, or SSH connection death.
+func runHoldDaemon(host *config.Host) error {
+	sock := holdSocketPath(host.Name)
+	if _, err := holdProbe(sock); err == nil {
+		return fmt.Errorf("already holding %s (socket %s)", host.Name, sock)
+	}
+	_ = os.Remove(sock)
+
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), flagTimeout)
+	defer cancel()
+	c, err := sshx.Dial(ctx, host, currentPolicy())
+	if err != nil {
+		return err
+	}
+	dialMs := time.Since(start).Milliseconds()
+
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		c.Close()
+		return err
+	}
+	_ = os.Chmod(sock, 0o600)
+
+	d := newHoldDaemon(host, c, dialMs, holdIdle)
+	d.logf("holding %s (%s) — socket %s, dial %dms, idle timeout %s", host.Name, host.Target.Addr, sock, dialMs, holdIdle)
+	return d.run(ln)
+}
+
+// holdDaemon serves operations over one held sshx.Client. Each socket
+// connection is one operation; each operation opens its own SSH channel, so
+// concurrent invocations multiplex safely.
+type holdDaemon struct {
+	host   *config.Host
+	client *sshx.Client
+	dialMs int64
+	since  time.Time
+	idle   time.Duration
+
+	ops    atomic.Uint64
+	active atomic.Int64
+	last   atomic.Int64 // UnixNano of last op start/finish
+
+	sftpMu sync.Mutex
+	sftpc  *sftp.Client
+
+	ln       net.Listener
+	stopOnce sync.Once
+	done     chan struct{}
+}
+
+func newHoldDaemon(host *config.Host, c *sshx.Client, dialMs int64, idle time.Duration) *holdDaemon {
+	d := &holdDaemon{
+		host:   host,
+		client: c,
+		dialMs: dialMs,
+		since:  time.Now(),
+		idle:   idle,
+		done:   make(chan struct{}),
+	}
+	d.touch()
+	return d
+}
+
+func (d *holdDaemon) logf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, time.Now().Format("2006-01-02 15:04:05")+" "+format+"\n", args...)
+}
+
+func (d *holdDaemon) touch() { d.last.Store(time.Now().UnixNano()) }
+
+// run serves ln until shutdown. Closing ln unlinks the socket (Go's
+// UnixListener unlinks on Close), so a clean exit leaves no stale file.
+func (d *holdDaemon) run(ln net.Listener) error {
+	d.ln = ln
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	go func() {
+		select {
+		case s := <-sigCh:
+			d.shutdown(fmt.Sprintf("signal %v", s))
+		case <-d.done:
+		}
+	}()
+	go func() {
+		_ = d.client.SSH().Wait()
+		d.shutdown("ssh connection closed")
+	}()
+	go d.idleWatch()
+
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			<-d.done // shutdown in flight; wait for cleanup to finish
+			return nil
+		}
+		go d.serveConn(conn)
+	}
+}
+
+func (d *holdDaemon) shutdown(reason string) {
+	d.stopOnce.Do(func() {
+		d.logf("shutting down: %s", reason)
+		if d.ln != nil {
+			_ = d.ln.Close()
+		}
+		_ = d.client.Close()
+		close(d.done)
+	})
+}
+
+// idleWatch shuts the daemon down once no op has run for d.idle. In-flight
+// operations (active > 0) always defer the timeout.
+func (d *holdDaemon) idleWatch() {
+	tick := max(min(d.idle/4, 10*time.Second), 10*time.Millisecond)
+	t := time.NewTicker(tick)
+	defer t.Stop()
+	for {
+		select {
+		case <-d.done:
+			return
+		case <-t.C:
+			if d.active.Load() == 0 && time.Since(time.Unix(0, d.last.Load())) >= d.idle {
+				d.shutdown(fmt.Sprintf("idle for %s", d.idle))
+				return
+			}
+		}
+	}
+}
+
+// serveConn handles one connection = one operation.
+func (d *holdDaemon) serveConn(nc net.Conn) {
+	defer nc.Close()
+	fc := newFrameConn(nc)
+	if err := fc.writeJSON(frameHello, holdHello{
+		Version: holdProtoVersion,
+		Host:    d.host.Name,
+		Target:  d.host.Target.Addr,
+		Pid:     os.Getpid(),
+		DialMs:  d.dialMs,
+	}); err != nil {
+		return
+	}
+	// Probe connections read the hello and hang up; give real clients 10s
+	// to send their request.
+	_ = nc.SetReadDeadline(time.Now().Add(10 * time.Second))
+	t, payload, err := fc.readFrame()
+	if err != nil || t != frameReq {
+		return
+	}
+	_ = nc.SetReadDeadline(time.Time{})
+	var req holdRequest
+	if err := json.Unmarshal(payload, &req); err != nil {
+		_ = fc.writeJSON(frameExit, holdExit{Code: 1, Err: "bad request: " + err.Error()})
+		return
+	}
+
+	d.active.Add(1)
+	d.touch()
+	defer func() { d.active.Add(-1); d.touch() }()
+	d.ops.Add(1)
+
+	code, opErr := d.dispatch(fc, req)
+	if opErr != nil && code == 0 {
+		code = 1
+	}
+	exit := holdExit{Code: code}
+	if opErr != nil {
+		exit.Err = opErr.Error()
+	}
+	_ = fc.writeJSON(frameExit, exit)
+	if req.Op == "stop" {
+		d.shutdown("tn hold --stop")
+	}
+}
+
+func (d *holdDaemon) dispatch(fc *frameConn, req holdRequest) (int, error) {
+	switch req.Op {
+	case "exec":
+		return d.opExec(fc, req)
+	case "read":
+		return 0, d.withSFTP(func(sc *sftp.Client) error {
+			return readFile(sc, req.Path, fc.stream(frameStdout), req.JSON)
+		})
+	case "write":
+		return 0, d.opWrite(fc, req)
+	case "ls":
+		return 0, d.withSFTP(func(sc *sftp.Client) error {
+			return list(sc, req.Path, fc.stream(frameStdout), req.Long, req.JSON)
+		})
+	case "push":
+		if !filepath.IsAbs(req.Local) {
+			return 0, fmt.Errorf("push through hold needs an absolute local path, got %q", req.Local)
+		}
+		return 0, d.withSFTP(func(sc *sftp.Client) error { return push(sc, req.Local, req.Remote) })
+	case "pull":
+		if !filepath.IsAbs(req.Local) {
+			return 0, fmt.Errorf("pull through hold needs an absolute local path, got %q", req.Local)
+		}
+		return 0, d.withSFTP(func(sc *sftp.Client) error { return pull(sc, req.Remote, req.Local) })
+	case "info":
+		return 0, d.opInfo(fc)
+	case "stop":
+		return 0, nil
+	default:
+		return 0, fmt.Errorf("hold daemon does not proxy op %q — this command dials directly", req.Op)
+	}
+}
+
+// opExec runs the composed command on a fresh session, bridging the
+// client's stdin/signal frames in and stdout/stderr frames out.
+func (d *holdDaemon) opExec(fc *frameConn, req holdRequest) (int, error) {
+	sess, err := d.client.SSH().NewSession()
+	if err != nil {
+		return 0, err
+	}
+	defer sess.Close()
+
+	stdinR, stdinW := io.Pipe()
+	sess.Stdin = stdinR
+	sess.Stdout = fc.stream(frameStdout)
+	sess.Stderr = fc.stream(frameStderr)
+
+	go func() {
+		defer stdinW.Close()
+		for {
+			t, p, err := fc.readFrame()
+			if err != nil {
+				stdinW.CloseWithError(err)
+				return
+			}
+			switch t {
+			case frameStdin:
+				if _, err := stdinW.Write(p); err != nil {
+					return
+				}
+			case frameStdinEOF:
+				return
+			case frameSignal:
+				_ = sess.Signal(ssh.Signal(string(p)))
+			}
+		}
+	}()
+
+	code, err := exitCodeOf(sess.Run(buildExecCommand(req.Args, req.Env, req.Cwd, req.Proxy)))
+	stdinR.Close() // unblock a stdin bridge stuck writing to a finished session
+	return code, err
+}
+
+// opWrite streams the client's stdin frames into an atomic remote write.
+func (d *holdDaemon) opWrite(fc *frameConn, req holdRequest) error {
+	pr, pw := io.Pipe()
+	go func() {
+		for {
+			t, p, err := fc.readFrame()
+			if err != nil {
+				pw.CloseWithError(err)
+				return
+			}
+			switch t {
+			case frameStdin:
+				if _, err := pw.Write(p); err != nil {
+					return
+				}
+			case frameStdinEOF:
+				pw.Close()
+				return
+			}
+		}
+	}()
+	err := d.withSFTP(func(sc *sftp.Client) error { return writeFile(sc, req.Path, pr) })
+	pr.CloseWithError(err) // unblock the bridge if the write failed mid-stream
+	return err
+}
+
+// opInfo reports daemon state plus a fresh ping and remote summary.
+func (d *holdDaemon) opInfo(fc *frameConn) error {
+	info := holdInfo{
+		Host:        d.host.Name,
+		Target:      d.host.Target.Addr,
+		HasJump:     d.host.Jump != nil,
+		Pid:         os.Getpid(),
+		DialMs:      d.dialMs,
+		HeldSince:   d.since.Format(time.RFC3339),
+		OpsServed:   d.ops.Load(),
+		IdleTimeout: d.idle.String(),
+	}
+	if rtt, err := d.client.Ping(); err == nil {
+		info.PingMs = rtt.Milliseconds()
+	}
+	if sess, err := d.client.SSH().NewSession(); err == nil {
+		out, _ := sess.CombinedOutput(remoteInfoCmd)
+		sess.Close()
+		info.Remote = strings.TrimSpace(string(out))
+	}
+	return json.NewEncoder(fc.stream(frameStdout)).Encode(info)
+}
+
+// withSFTP runs f against a lazily-created shared SFTP client. On a lost
+// connection the cached client is dropped so the next op reopens the
+// subsystem; f itself is never retried (it may already have emitted output).
+func (d *holdDaemon) withSFTP(f func(*sftp.Client) error) error {
+	d.sftpMu.Lock()
+	if d.sftpc == nil {
+		sc, err := newSFTP(d.client)
+		if err != nil {
+			d.sftpMu.Unlock()
+			return err
+		}
+		d.sftpc = sc
+	}
+	sc := d.sftpc
+	d.sftpMu.Unlock()
+
+	err := f(sc)
+	if errors.Is(err, sftp.ErrSSHFxConnectionLost) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		d.sftpMu.Lock()
+		if d.sftpc == sc {
+			_ = sc.Close()
+			d.sftpc = nil
+		}
+		d.sftpMu.Unlock()
+	}
+	return err
+}
