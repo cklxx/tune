@@ -12,37 +12,57 @@ import (
 
 	"github.com/cklxx/tune/internal/config"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/term"
 )
 
 // tryHeld routes req through a live hold daemon for the resolved host.
-// ok=false means "no usable daemon" and the caller must fall back to a
-// direct dial. Once the request frame is on the wire the op is committed:
-// errors after that are returned as errors, never silently re-run (the op
-// may have had side effects on the remote).
-func tryHeld(req holdRequest, stdin io.Reader, stdout, stderr io.Writer) (code int, ok bool, err error) {
+// Eligible non-interactive calls quietly start one when absent. ok=false
+// means the caller must fall back to a direct dial; host is returned so that
+// fallback need not reload and resolve config. Once the request frame is on
+// the wire the op is committed: errors after that are returned as errors,
+// never silently re-run (the op may have had side effects on the remote).
+func tryHeld(req holdRequest, stdin io.Reader, stdout, stderr io.Writer) (code int, ok bool, host *config.Host, err error) {
 	if !holdSupported {
-		return 0, false, nil
+		return 0, false, nil, nil
 	}
 	cfg, err := config.Load()
 	if err != nil {
-		return 0, false, nil
+		return 0, false, nil, nil
 	}
-	host, err := cfg.Resolve(flagHost)
+	host, err = cfg.Resolve(flagHost)
 	if err != nil {
-		return 0, false, nil
+		return 0, false, nil, nil
 	}
 	conn, hello, err := holdAttach(holdSocketPath(host.Name))
+	if err != nil && holdAutoStartEligible(req, stdin) {
+		if ensureHold(host, true) == nil {
+			conn, hello, err = holdAttach(holdSocketPath(host.Name))
+		}
+	}
 	if err != nil {
-		return 0, false, nil
+		return 0, false, host, nil
 	}
 	defer conn.Close()
-	if hello.Target != host.Target.Addr {
-		fmt.Fprintf(os.Stderr, "tn: held connection for %q targets %s but config says %s — dialing direct (tn hold --stop && tn hold to refresh)\n",
-			host.Name, hello.Target, host.Target.Addr)
-		return 0, false, nil
+	if hello.Config != holdConfigID(host, currentPolicy()) {
+		fmt.Fprintf(os.Stderr, "tn: held connection for %q uses stale connection settings — dialing direct (tn hold --stop && tn hold to refresh)\n", host.Name)
+		return 0, false, host, nil
 	}
 	code, err = holdRoundTrip(newFrameConn(conn), req, stdin, stdout, stderr)
-	return code, true, err
+	return code, true, host, err
+}
+
+func holdAutoStartEligible(req holdRequest, stdin io.Reader) bool {
+	switch req.Op {
+	case "read", "ls", "push", "pull":
+		return true
+	case "exec", "write":
+		if f, ok := stdin.(*os.File); ok {
+			return !term.IsTerminal(int(f.Fd()))
+		}
+		return stdin != nil
+	default:
+		return false
+	}
 }
 
 // holdRoundTrip sends one request and pumps frames until EXIT. For exec it
@@ -133,7 +153,7 @@ func heldResult(code int, err error) error {
 // usable daemon is up.
 func heldInfo() (*holdInfo, bool) {
 	var buf bytes.Buffer
-	code, ok, err := tryHeld(holdRequest{Op: "info"}, nil, &buf, io.Discard)
+	code, ok, _, err := tryHeld(holdRequest{Op: "info"}, nil, &buf, io.Discard)
 	if !ok || err != nil || code != 0 {
 		return nil, false
 	}

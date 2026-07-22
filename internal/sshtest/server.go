@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -86,13 +87,20 @@ type Options struct {
 
 // Server is a running test SSH server. Close it (or rely on t.Cleanup).
 type Server struct {
-	Addr     string
-	HostKey  ssh.PublicKey
-	listener net.Listener
-	opts     Options
-	wg       sync.WaitGroup
-	closeMu  sync.Mutex
-	closed   bool
+	Addr      string
+	HostKey   ssh.PublicKey
+	listener  net.Listener
+	opts      Options
+	wg        sync.WaitGroup
+	closeMu   sync.Mutex
+	closed    bool
+	connCount atomic.Uint64
+}
+
+// ConnectionCount returns the number of successfully established SSH
+// connections accepted by the server.
+func (s *Server) ConnectionCount() uint64 {
+	return s.connCount.Load()
 }
 
 // Close stops accepting new connections and waits for active ones to finish.
@@ -170,6 +178,7 @@ func (s *Server) serve(c net.Conn, cfg *ssh.ServerConfig) {
 	if err != nil {
 		return
 	}
+	s.connCount.Add(1)
 	defer conn.Close()
 
 	// Per-connection state for tcpip-forward listeners: when the SSH conn

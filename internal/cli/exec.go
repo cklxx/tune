@@ -35,14 +35,24 @@ With --proxy, sets HTTP_PROXY/HTTPS_PROXY/ALL_PROXY for the command — useful
 to make package managers go through the local network. Requires "tn proxy"
 to be running in another shell.
 
-If "tn hold" is running for the host, the dial is skipped and the command
-runs over the held connection (see "tn hold --help").`,
+Non-interactive calls automatically start and reuse the per-host held
+connection. Interactive calls reuse an existing hold or dial directly (see
+"tn hold --help").`,
 	Args:               cobra.MinimumNArgs(1),
 	DisableFlagParsing: false,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		req := holdRequest{Op: "exec", Args: args, Env: execEnv, Cwd: execCwd, Proxy: execProxy}
-		if code, ok, err := tryHeld(req, os.Stdin, os.Stdout, os.Stderr); ok {
+		code, ok, host, err := tryHeld(req, os.Stdin, os.Stdout, os.Stderr)
+		if ok {
 			return heldResult(code, err)
+		}
+		if host != nil {
+			c, _, err := connectHost(host)
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			return runExec(c, args, execEnv, execCwd, execProxy)
 		}
 		c, _, err := connect()
 		if err != nil {

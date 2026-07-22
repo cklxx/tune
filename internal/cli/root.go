@@ -18,8 +18,9 @@ jumpbox) with a focus on:
 
 Configure hosts with "tn init", then use "tn exec", "tn push", "tn pull",
 "tn read", "tn write", "tn ls", "tn proxy", "tn shell", and "tn status".
-Run "tn hold" once to keep the connection open in the background — every
-subsequent command skips the dial (~5ms instead of 400ms-1s).`,
+Run "tn hold" to prewarm the connection explicitly. Non-interactive exec and
+file commands start it automatically; concurrent calls share one startup and
+then multiplex over the held SSH connection.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 }

@@ -4,9 +4,13 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"net"
 	"sync"
+
+	"github.com/cklxx/tune/internal/config"
+	"github.com/cklxx/tune/internal/sshx"
 )
 
 // The hold wire protocol: length-prefixed frames over a Unix socket.
@@ -35,14 +39,26 @@ const (
 )
 
 // holdHello is sent by the daemon on every accepted connection, before the
-// client commits to anything. Target lets the client detect a daemon holding
-// a connection to an address the config no longer points at.
+// client commits to anything. Config identifies all connection-affecting host
+// settings so a changed user, jump, auth source, or host-key policy is not
+// silently served by an old held connection.
 type holdHello struct {
 	Version int    `json:"version"`
 	Host    string `json:"host"`
 	Target  string `json:"target"`
+	Config  uint64 `json:"config"`
 	Pid     int    `json:"pid"`
 	DialMs  int64  `json:"dialMs"` // dial cost paid once, when the hold started
+}
+
+func holdConfigID(host *config.Host, policy sshx.HostKeyPolicy) uint64 {
+	h := fnv.New64a()
+	_, _ = fmt.Fprintf(h, "%d\x00%s\x00%s\x00%s\x00%s\x00%s\x00", policy,
+		host.Target.Addr, host.Target.User, host.Target.IdentityFile, host.Target.PasswordCmd, host.KnownHosts)
+	if host.Jump != nil {
+		_, _ = fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s", host.Jump.Addr, host.Jump.User, host.Jump.IdentityFile, host.Jump.PasswordCmd)
+	}
+	return h.Sum64()
 }
 
 // holdRequest describes one operation for the daemon to run on the held

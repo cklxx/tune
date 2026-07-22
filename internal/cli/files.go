@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/cklxx/tune/internal/config"
+	"github.com/cklxx/tune/internal/sshx"
 	"github.com/pkg/sftp"
 	"github.com/spf13/cobra"
 )
@@ -30,12 +32,21 @@ files copied before the failure remain on the remote (no rollback).`,
   tn push secrets.env /etc/myapp/.env  # single file rename`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		var host *config.Host
 		if local, err := filepath.Abs(args[0]); err == nil {
-			if code, ok, err := tryHeld(holdRequest{Op: "push", Local: local, Remote: args[1]}, nil, os.Stdout, os.Stderr); ok {
+			code, ok, resolved, err := tryHeld(holdRequest{Op: "push", Local: local, Remote: args[1]}, nil, os.Stdout, os.Stderr)
+			host = resolved
+			if ok {
 				return heldResult(code, err)
 			}
 		}
-		c, _, err := connect()
+		var c *sshx.Client
+		var err error
+		if host != nil {
+			c, _, err = connectHost(host)
+		} else {
+			c, _, err = connect()
+		}
 		if err != nil {
 			return err
 		}
@@ -63,12 +74,21 @@ which only re-pulls files whose (size, mtime) changed.`,
   tn pull /etc/nginx ./nginx-snapshot`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		var host *config.Host
 		if local, err := filepath.Abs(args[1]); err == nil {
-			if code, ok, err := tryHeld(holdRequest{Op: "pull", Remote: args[0], Local: local}, nil, os.Stdout, os.Stderr); ok {
+			code, ok, resolved, err := tryHeld(holdRequest{Op: "pull", Remote: args[0], Local: local}, nil, os.Stdout, os.Stderr)
+			host = resolved
+			if ok {
 				return heldResult(code, err)
 			}
 		}
-		c, _, err := connect()
+		var c *sshx.Client
+		var err error
+		if host != nil {
+			c, _, err = connectHost(host)
+		} else {
+			c, _, err = connect()
+		}
 		if err != nil {
 			return err
 		}
@@ -99,10 +119,16 @@ underlying SFTP error to stderr; nothing is written to stdout.`,
   tn read /var/log/app.log | grep ERROR | head`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if code, ok, err := tryHeld(holdRequest{Op: "read", Path: args[0], JSON: flagJSON}, nil, cmd.OutOrStdout(), os.Stderr); ok {
+		code, ok, host, err := tryHeld(holdRequest{Op: "read", Path: args[0], JSON: flagJSON}, nil, cmd.OutOrStdout(), os.Stderr)
+		if ok {
 			return heldResult(code, err)
 		}
-		c, _, err := connect()
+		var c *sshx.Client
+		if host != nil {
+			c, _, err = connectHost(host)
+		} else {
+			c, _, err = connect()
+		}
 		if err != nil {
 			return err
 		}
@@ -135,10 +161,16 @@ something in or use < /dev/null for an empty file.`,
   tn write /tmp/empty < /dev/null`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if code, ok, err := tryHeld(holdRequest{Op: "write", Path: args[0]}, os.Stdin, os.Stdout, os.Stderr); ok {
+		code, ok, host, err := tryHeld(holdRequest{Op: "write", Path: args[0]}, os.Stdin, os.Stdout, os.Stderr)
+		if ok {
 			return heldResult(code, err)
 		}
-		c, _, err := connect()
+		var c *sshx.Client
+		if host != nil {
+			c, _, err = connectHost(host)
+		} else {
+			c, _, err = connect()
+		}
 		if err != nil {
 			return err
 		}
@@ -176,10 +208,16 @@ pipe through "tn exec -- getent passwd UID" or do the lookup locally.`,
 		if len(args) == 1 {
 			path = args[0]
 		}
-		if code, ok, err := tryHeld(holdRequest{Op: "ls", Path: path, Long: lsLong, JSON: flagJSON}, nil, cmd.OutOrStdout(), os.Stderr); ok {
+		code, ok, host, err := tryHeld(holdRequest{Op: "ls", Path: path, Long: lsLong, JSON: flagJSON}, nil, cmd.OutOrStdout(), os.Stderr)
+		if ok {
 			return heldResult(code, err)
 		}
-		c, _, err := connect()
+		var c *sshx.Client
+		if host != nil {
+			c, _, err = connectHost(host)
+		} else {
+			c, _, err = connect()
+		}
 		if err != nil {
 			return err
 		}
@@ -409,4 +447,3 @@ func pullFile(fc *sftp.Client, remote, local string, mode os.FileMode) error {
 	}
 	return dst.Close()
 }
-

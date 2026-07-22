@@ -13,6 +13,12 @@ import (
 // command direct-dial, exactly as before hold existed.
 const holdSupported = false
 
-func spawnHold(_ *config.Host) error {
+func withHoldLock(_ *config.Host, f func() error) error { return f() }
+
+func ensureHold(_ *config.Host, _ bool) error {
+	return errors.New("tn hold is not supported on Windows — commands dial directly")
+}
+
+func spawnHold(_ *config.Host, _ bool) error {
 	return errors.New("tn hold is not supported on Windows — commands dial directly")
 }

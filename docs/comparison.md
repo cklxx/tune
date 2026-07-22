@@ -7,7 +7,7 @@ updated 2026-05.
 
 | Tool                | Language | Pure-Go/Rust SSH | Jumpbox auth in tool | Reverse SOCKS | File sync     | Remote agent  | Daemon        | Auto-reconnect |
 | ------------------- | -------- | ---------------- | -------------------- | ------------- | ------------- | ------------- | ------------- | -------------- |
-| **tn** (this)       | Go       | yes              | yes (incl. password) | yes (1st-class) | one-shot SFTP | (planned)     | (planned)     | (planned)      |
+| **tn** (this)       | Go       | yes              | yes (incl. password) | yes (1st-class) | one-shot SFTP | no            | yes (local hold) | reconnect next call |
 | Mutagen             | Go       | yes              | via OpenSSH config   | yes           | bidirectional, watch | auto-installed | yes      | yes            |
 | distant             | Rust     | yes              | via OpenSSH config   | no            | one-shot      | yes (manual)  | yes (manager) | partial        |
 | Eternal Terminal    | C++      | no (libssh)      | tmux-style only      | tunnels only  | no            | yes           | yes           | yes (its core) |
@@ -40,26 +40,25 @@ Specifically:
 
 ## Where tn isn't (yet) competitive
 
-- **No daemon.** Every CLI invocation does a fresh TCP+SSH handshake. For
-  per-call latency below ~50ms you need a connection-holding process. Both
-  Mutagen and distant have this. `tn bench` exists so you can measure
-  whether it actually matters for you.
+- **No remote agent.** The local per-host hold daemon removes repeated TCP+SSH
+  handshakes and multiplexes concurrent CLI calls, but each command still opens
+  a stock SSH session and starts a remote shell/process. Mutagen's remote binary
+  can batch finer-grained syscalls; tn keeps zero-install remote semantics.
 - **No file watch.** Mutagen's killer feature — bidirectional, conflict-aware,
   inotify-driven — is absent. `tn push` / `pull` are one-shot.
-- **No remote agent.** Mutagen drops a binary on the remote (via scp) and
-  uses it for batched syscalls. We rely on stock `sshd` + `pkg/sftp`'s
-  subsystem. Slower per-call but zero install on the remote.
-- **No auto-reconnect with op replay.** ET and Mosh make flaky links
-  invisible. We retry only at the operation level (`tn` is one-shot, run
-  it again).
+- **No transparent operation replay.** A dropped held connection is replaced by
+  the next uncommitted call; tn never silently replays a command that may already
+  have changed remote state.
 
 ## What we're stealing from each, when
 
 - From **Mutagen**: file-watch + bidirectional mirror (planned `tn mirror`).
   Their wire protocol over a single `session+exec` channel is a great
   precedent.
-- From **distant**: per-host manager with a small JSON-RPC over Unix socket;
-  CLI invocations are RPC calls. (Planned `tn daemon`.)
+- From **distant**: implemented the useful local part of its per-host manager:
+  short-lived CLI processes attach to one connection-holding process over a
+  Unix socket. tn deliberately keeps the protocol operation-sized and installs
+  nothing on the remote.
 - From **Eternal Terminal**: server-side process that survives client
   reconnects. We probably won't go this far — TCP-replay at the SSH level
   is enough for our scope.

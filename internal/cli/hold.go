@@ -34,11 +34,13 @@ var holdCmd = &cobra.Command{
 	Short: "Hold a persistent connection so other tn commands skip the dial",
 	Long: `Dials the host once, detaches into the background, and keeps the SSH
 connection open behind a Unix socket (~/.tn/hold-<host>.sock, mode 0600).
-While it runs, "tn exec", "tn read", "tn write", "tn ls", "tn push" and
-"tn pull" attach to the socket instead of dialing — the 400ms-1s dial
-drops to ~5ms per invocation. Nothing else changes: same output, same
-exit codes, same flags. Concurrent invocations multiplex safely over the
-one connection.
+Non-interactive "tn exec", "tn read", "tn write", "tn ls", "tn push" and
+"tn pull" start this hold automatically when needed; running "tn hold"
+explicitly prewarms it. Concurrent invocations open independent SSH channels
+on the same connection, avoiding duplicate jump + target handshakes.
+
+The held path removes connection setup, not the remote SSH session, shell, and
+process startup paid by every exec. Output, exit codes, and flags stay the same.
 
 Commands not routed through the hold (they dial directly, by design):
 "tn shell", "tn proxy", "tn mirror", "tn bench", "tn doctor",
@@ -73,16 +75,12 @@ key and verify auth, then retry.`,
 			return err
 		}
 		if holdStop {
-			return stopHold(host)
-		}
-		if hello, err := holdProbe(holdSocketPath(host.Name)); err == nil {
-			fmt.Printf("already holding %s (pid %d) — tn hold --stop to restart\n", host.Name, hello.Pid)
-			return nil
+			return withHoldLock(host, func() error { return stopHold(host) })
 		}
 		if holdForeground {
 			return runHoldDaemon(host)
 		}
-		return spawnHold(host)
+		return ensureHold(host, false)
 	},
 }
 
@@ -101,9 +99,8 @@ func holdLogPath(hostName string) string {
 	return filepath.Join(config.Home(), "hold-"+hostName+".log")
 }
 
-// holdProbe connects to sock and reads the daemon's hello. A dead socket
-// (refused, not-a-socket, hung) is unlinked so the next hold can take over;
-// only "no such file" leaves the path alone.
+// holdProbe connects to sock and reads the daemon's hello without mutating
+// socket state.
 func holdProbe(sock string) (*holdHello, error) {
 	conn, hello, err := holdAttach(sock)
 	if err != nil {
@@ -114,13 +111,11 @@ func holdProbe(sock string) (*holdHello, error) {
 }
 
 // holdAttach dials sock and reads the hello frame, leaving the connection
-// open for a request. See holdProbe for stale-socket semantics.
+// open for a request. It is observation-only: callers that own startup or
+// cleanup decide whether a failed socket should be removed.
 func holdAttach(sock string) (net.Conn, *holdHello, error) {
 	conn, err := net.DialTimeout("unix", sock, 500*time.Millisecond)
 	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			_ = os.Remove(sock) // stale: daemon was SIGKILLed or is wedged
-		}
 		return nil, nil, err
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
@@ -136,14 +131,17 @@ func holdAttach(sock string) (net.Conn, *holdHello, error) {
 		return nil, nil, err
 	}
 	if hello.Version != holdProtoVersion {
+		if p, err := os.FindProcess(hello.Pid); err == nil {
+			_ = p.Signal(syscall.SIGTERM)
+		}
 		conn.Close()
-		return nil, nil, fmt.Errorf("hold daemon speaks protocol v%d, this tn speaks v%d — tn hold --stop && tn hold", hello.Version, holdProtoVersion)
+		return nil, nil, fmt.Errorf("stopped incompatible hold daemon (protocol v%d); retry the command", hello.Version)
 	}
 	return conn, hello, nil
 }
 
-// stopHold asks a running daemon to shut down. Idempotent: a missing or
-// stale socket is reported (and cleaned) without error.
+// stopHold asks a running daemon to shut down. Idempotent when no daemon is
+// available.
 func stopHold(host *config.Host) error {
 	sock := holdSocketPath(host.Name)
 	conn, hello, err := holdAttach(sock)
@@ -160,14 +158,31 @@ func stopHold(host *config.Host) error {
 	return nil
 }
 
+// prepareHoldSocket removes only paths proven stale. Timeouts, permission
+// failures, and protocol errors may belong to a live daemon and are preserved.
+func prepareHoldSocket(sock string, probeErr error) error {
+	info, err := os.Lstat(sock)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSocket == 0 || errors.Is(probeErr, syscall.ECONNREFUSED) {
+		return os.Remove(sock)
+	}
+	return fmt.Errorf("hold socket %s exists but is not responding: %w", sock, probeErr)
+}
+
 // runHoldDaemon dials the host and serves the hold socket until idle
 // timeout, --stop, SIGTERM, or SSH connection death.
 func runHoldDaemon(host *config.Host) error {
 	sock := holdSocketPath(host.Name)
 	if _, err := holdProbe(sock); err == nil {
 		return fmt.Errorf("already holding %s (socket %s)", host.Name, sock)
+	} else if err := prepareHoldSocket(sock, err); err != nil {
+		return err
 	}
-	_ = os.Remove(sock)
 
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), flagTimeout)
@@ -300,6 +315,7 @@ func (d *holdDaemon) serveConn(nc net.Conn) {
 		Version: holdProtoVersion,
 		Host:    d.host.Name,
 		Target:  d.host.Target.Addr,
+		Config:  holdConfigID(d.host, currentPolicy()),
 		Pid:     os.Getpid(),
 		DialMs:  d.dialMs,
 	}); err != nil {

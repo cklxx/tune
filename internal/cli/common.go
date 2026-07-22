@@ -51,6 +51,10 @@ func connect() (*sshx.Client, *config.Host, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	return connectHost(host)
+}
+
+func connectHost(host *config.Host) (*sshx.Client, *config.Host, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), flagTimeout)
 	defer cancel()
 	c, err := sshx.Dial(ctx, host, currentPolicy())

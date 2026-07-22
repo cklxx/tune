@@ -15,9 +15,10 @@ multiplexed over.
   inside a container and everything works — no `sshpass` for password
   auth, no `rsync` for tree copies, no `~/.ssh/config` to coax through a
   jump host.
-- **One connection through the jump.** Every `tn exec`, `tn read`,
-  `tn ls`, `tn push` after the dial is a multiplexed SSH channel on the
-  same `ssh.Client`. No per-command reconnect, no socket files.
+- **One connection through the jump.** Non-interactive `tn exec`, `tn read`,
+  `tn ls`, `tn push`, and related one-shot operations automatically share a
+  per-host held SSH connection over a local Unix socket. No per-command
+  reconnect after the first call.
 - **Agent-friendly output by default.** Plain `key: value` for humans,
   `--json` everywhere it matters, atomic writes, real exit codes,
   stdout/stderr cleanly separated, error messages that say *how to fix
@@ -34,16 +35,20 @@ commands, maybe installs a package," it slots in cleanly.
 
 ## Hold: skip the dial
 
-Every `tn` invocation normally dials jump + target fresh. `tn hold -H <host>`
-dials once, detaches, and serves the connection over a Unix socket
-(`~/.tn/hold-<host>.sock`, 0600). While it runs, `exec` / `read` / `write` /
-`ls` / `push` / `pull` attach instead of dialing — same output, same exit
-codes. Idle timeout 30m (`--idle`), `--stop` to end it, `tn status` shows
-`held: true`. Measured against a jumpboxed pod: 1.82s → 0.40s per `tn exec`.
+On Unix, the first non-interactive `exec` / `read` / `write` / `ls` / `push` /
+`pull` call automatically starts a per-host held connection. Concurrent agents
+coalesce onto that one startup, then each operation uses its own SSH channel on
+the shared connection. You can also run `tn hold -H <host>` explicitly to
+prewarm or inspect it. The daemon listens on `~/.tn/hold-<host>.sock` (0600),
+idles out after 30m (`--idle`), and stops with `tn hold --stop`; `tn status`
+shows `held: true`. Windows keeps the direct-dial behavior.
+
+This removes repeated jump + target handshakes, not remote process startup.
+Measured against a jumpboxed pod: 1.82s → 0.40s per `tn exec`.
 
 ```sh
-$ tn hold -H prod        # once
-$ tn exec -H prod -- ls  # every call now ~4.5x faster
+$ tn hold -H prod        # optional prewarm
+$ tn exec -H prod -- ls  # auto-starts/reuses the hold for agent-style calls
 ```
 
 ## Quick start
@@ -146,9 +151,9 @@ effects. The set:
 - **`tn shell`** — interactive PTY with SIGWINCH forwarding.
 - **`tn status`** — dial time, ping RTT, remote `uname` + `df` summary.
 - **`tn bench`** — measure cold dial cost, RTT distribution over N
-  pings, no-op exec turnaround, single-stream throughput. Useful to
-  decide whether the (planned) daemon mode is worth setting up for
-  your link.
+  pings, no-op exec turnaround, single-stream throughput. Cold dial versus
+  exec turnaround shows how much the automatic held connection can remove
+  and how much remains in remote session/process startup.
 - **`tn doctor`** — probe every host in your config in parallel with a
   short timeout; non-zero exit if any failed. `--json` for monitoring.
 - **`tn upload-key`** — `ssh-copy-id` equivalent. Reads your local
