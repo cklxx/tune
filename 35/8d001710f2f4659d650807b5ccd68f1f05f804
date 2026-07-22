@@ -1,0 +1,33 @@
+internal/cli/common.go
+  s_c7edf64e1678ba::t_699776cf289345 57-63
+internal/cli/exec.go
+  s_c7edf64e1678ba::t_df9aa979d08973 49
+internal/cli/files.go
+  s_c7edf64e1678ba::t_95f5aa5a66127f 42,78,113,150,192
+internal/cli/hold.go
+  s_c7edf64e1678ba::t_7a115454e0ecfb 467-471
+internal/cli/hold_test.go
+  s_c7edf64e1678ba::t_1fd373be17ed36 363
+internal/cli/holdproto.go
+  s_c7edf64e1678ba::t_dca869eda67596 97,99
+internal/cli/status.go
+  s_c7edf64e1678ba::t_fdf1cf32294367 56,70-71,101-103,108-148,157
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "358d001710f2f4659d650807b5ccd68f1f05f804",
+  "prompts": {},
+  "sessions": {
+    "s_c7edf64e1678ba": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7ba0657a-aebe-47bb-a47d-1281297fef52",
+        "model": "unknown"
+      },
+      "human_author": "cklxx <q1293822641@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
