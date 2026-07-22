@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/cklxx/tune/internal/config"
-	"github.com/cklxx/tune/internal/sshx"
 	"github.com/pkg/sftp"
 	"github.com/spf13/cobra"
 )
@@ -40,13 +39,7 @@ files copied before the failure remain on the remote (no rollback).`,
 				return heldResult(code, err)
 			}
 		}
-		var c *sshx.Client
-		var err error
-		if host != nil {
-			c, _, err = connectHost(host)
-		} else {
-			c, _, err = connect()
-		}
+		c, _, err := connectResolved(host)
 		if err != nil {
 			return err
 		}
@@ -82,13 +75,7 @@ which only re-pulls files whose (size, mtime) changed.`,
 				return heldResult(code, err)
 			}
 		}
-		var c *sshx.Client
-		var err error
-		if host != nil {
-			c, _, err = connectHost(host)
-		} else {
-			c, _, err = connect()
-		}
+		c, _, err := connectResolved(host)
 		if err != nil {
 			return err
 		}
@@ -123,12 +110,7 @@ underlying SFTP error to stderr; nothing is written to stdout.`,
 		if ok {
 			return heldResult(code, err)
 		}
-		var c *sshx.Client
-		if host != nil {
-			c, _, err = connectHost(host)
-		} else {
-			c, _, err = connect()
-		}
+		c, _, err := connectResolved(host)
 		if err != nil {
 			return err
 		}
@@ -165,12 +147,7 @@ something in or use < /dev/null for an empty file.`,
 		if ok {
 			return heldResult(code, err)
 		}
-		var c *sshx.Client
-		if host != nil {
-			c, _, err = connectHost(host)
-		} else {
-			c, _, err = connect()
-		}
+		c, _, err := connectResolved(host)
 		if err != nil {
 			return err
 		}
@@ -212,12 +189,7 @@ pipe through "tn exec -- getent passwd UID" or do the lookup locally.`,
 		if ok {
 			return heldResult(code, err)
 		}
-		var c *sshx.Client
-		if host != nil {
-			c, _, err = connectHost(host)
-		} else {
-			c, _, err = connect()
-		}
+		c, _, err := connectResolved(host)
 		if err != nil {
 			return err
 		}

@@ -54,6 +54,13 @@ func connect() (*sshx.Client, *config.Host, error) {
 	return connectHost(host)
 }
 
+func connectResolved(host *config.Host) (*sshx.Client, *config.Host, error) {
+	if host == nil {
+		return connect()
+	}
+	return connectHost(host)
+}
+
 func connectHost(host *config.Host) (*sshx.Client, *config.Host, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), flagTimeout)
 	defer cancel()

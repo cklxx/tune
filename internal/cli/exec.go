@@ -46,15 +46,7 @@ connection. Interactive calls reuse an existing hold or dial directly (see
 		if ok {
 			return heldResult(code, err)
 		}
-		if host != nil {
-			c, _, err := connectHost(host)
-			if err != nil {
-				return err
-			}
-			defer c.Close()
-			return runExec(c, args, execEnv, execCwd, execProxy)
-		}
-		c, _, err := connect()
+		c, _, err := connectResolved(host)
 		if err != nil {
 			return err
 		}

@@ -360,7 +360,7 @@ func TestHoldInfoOp(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &info); err != nil {
 		t.Fatalf("info json: %v\n%s", err, out)
 	}
-	if info.Host != "t" || info.Target != host.Target.Addr || info.DialMs != 42 || info.IdleTimeout != "45m0s" || info.OpsServed < 1 {
+	if info.Host != "t" || info.Target != host.Target.Addr || info.DialMs != 42 || info.IdleTimeout != "45m0s" || info.OpsServed < 1 || info.Remote == "" {
 		t.Errorf("info fields: %+v", info)
 	}
 }

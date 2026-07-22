@@ -53,22 +53,22 @@ For multi-host pass/fail in CI, use "tn doctor".`,
 		policy := currentPolicy()
 
 		if info, ok := heldInfo(); ok {
+			probe := statusProbe{PingMs: info.PingMs, PingError: info.PingError, Remote: info.Remote, RemoteError: info.RemoteError}
 			report := map[string]any{
 				"host":        host.Name,
 				"target":      info.Target,
 				"hasJump":     info.HasJump,
 				"held":        true,
-				"pingMs":      info.PingMs,
 				"heldDialMs":  info.DialMs,
 				"heldSince":   info.HeldSince,
 				"heldPid":     info.Pid,
 				"opsServed":   info.OpsServed,
 				"idleTimeout": info.IdleTimeout,
-				"remote":      info.Remote,
 				"clientVer":   "tn 0.1",
 				"goVersion":   runtime.Version(),
-				"ok":          true,
 			}
+			addStatusProbe(report, probe)
+			report["ok"] = probe.PingError == "" && probe.RemoteError == ""
 			if flagJSON {
 				report["dialMs"] = 0
 			} else {
@@ -98,22 +98,52 @@ For multi-host pass/fail in CI, use "tn doctor".`,
 		}
 		defer c.Close()
 
-		rtt, perr := c.Ping()
-		report["pingMs"] = rtt.Milliseconds()
-		if perr != nil {
-			report["pingError"] = perr.Error()
-		}
-
-		// Remote info: uname + uptime + free disk on $HOME, single round trip.
-		sess, err := c.SSH().NewSession()
-		if err == nil {
-			out, _ := sess.CombinedOutput(remoteInfoCmd)
-			sess.Close()
-			report["remote"] = strings.TrimSpace(string(out))
-		}
-		report["ok"] = true
+		probe := probeStatus(c)
+		addStatusProbe(report, probe)
+		report["ok"] = probe.PingError == "" && probe.RemoteError == ""
 		return emit(report, true)
 	},
+}
+
+type statusProbe struct {
+	PingMs      int64
+	PingError   string
+	Remote      string
+	RemoteError string
+}
+
+func probeStatus(c *sshx.Client) statusProbe {
+	var p statusProbe
+	if rtt, err := c.Ping(); err != nil {
+		p.PingError = err.Error()
+	} else {
+		p.PingMs = rtt.Milliseconds()
+	}
+	sess, err := c.SSH().NewSession()
+	if err != nil {
+		p.RemoteError = err.Error()
+		return p
+	}
+	defer sess.Close()
+	out, err := sess.CombinedOutput(remoteInfoCmd)
+	p.Remote = strings.TrimSpace(string(out))
+	if err != nil {
+		p.RemoteError = err.Error()
+	}
+	return p
+}
+
+func addStatusProbe(report map[string]any, p statusProbe) {
+	report["pingMs"] = p.PingMs
+	if p.PingError != "" {
+		report["pingError"] = p.PingError
+	}
+	if p.Remote != "" {
+		report["remote"] = p.Remote
+	}
+	if p.RemoteError != "" {
+		report["remoteError"] = p.RemoteError
+	}
 }
 
 // remoteInfoCmd summarizes the remote in one round trip. Shared by the
@@ -124,7 +154,7 @@ func emit(report map[string]any, _ bool) error {
 	if flagJSON {
 		return json.NewEncoder(os.Stdout).Encode(report)
 	}
-	order := []string{"host", "target", "hasJump", "held", "dialMs", "pingMs", "heldDialMs", "heldSince", "heldPid", "opsServed", "idleTimeout", "remote", "clientVer", "goVersion", "ok", "error", "pingError"}
+	order := []string{"host", "target", "hasJump", "held", "dialMs", "pingMs", "heldDialMs", "heldSince", "heldPid", "opsServed", "idleTimeout", "remote", "remoteError", "clientVer", "goVersion", "ok", "error", "pingError"}
 	for _, k := range order {
 		v, ok := report[k]
 		if !ok {

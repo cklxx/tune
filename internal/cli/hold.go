@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -465,14 +464,11 @@ func (d *holdDaemon) opInfo(fc *frameConn) error {
 		OpsServed:   d.ops.Load(),
 		IdleTimeout: d.idle.String(),
 	}
-	if rtt, err := d.client.Ping(); err == nil {
-		info.PingMs = rtt.Milliseconds()
-	}
-	if sess, err := d.client.SSH().NewSession(); err == nil {
-		out, _ := sess.CombinedOutput(remoteInfoCmd)
-		sess.Close()
-		info.Remote = strings.TrimSpace(string(out))
-	}
+	probe := probeStatus(d.client)
+	info.PingMs = probe.PingMs
+	info.PingError = probe.PingError
+	info.Remote = probe.Remote
+	info.RemoteError = probe.RemoteError
 	return json.NewEncoder(fc.stream(frameStdout)).Encode(info)
 }
 

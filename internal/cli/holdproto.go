@@ -94,7 +94,9 @@ type holdInfo struct {
 	OpsServed   uint64 `json:"opsServed"`
 	IdleTimeout string `json:"idleTimeout"`
 	PingMs      int64  `json:"pingMs"`
+	PingError   string `json:"pingError,omitempty"`
 	Remote      string `json:"remote,omitempty"`
+	RemoteError string `json:"remoteError,omitempty"`
 }
 
 // frameConn wraps a socket with atomic frame writes (stdout/stderr/signal
