@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/cklxx/tune/internal/sshx"
 	"github.com/spf13/cobra"
@@ -18,6 +19,7 @@ var (
 	execProxy bool
 	execEnv   []string
 	execCwd   string
+	execIdle  = 5 * time.Minute
 )
 
 var execCmd = &cobra.Command{
@@ -59,6 +61,7 @@ func init() {
 	execCmd.Flags().BoolVar(&execProxy, "proxy", false, "inject HTTP(S)_PROXY/ALL_PROXY env from the running 'tn proxy'")
 	execCmd.Flags().StringSliceVarP(&execEnv, "env", "e", nil, "extra environment, repeatable: -e KEY=VALUE")
 	execCmd.Flags().StringVar(&execCwd, "cwd", "", "working directory on the remote")
+	execCmd.Flags().DurationVar(&execIdle, "idle", 5*time.Minute, "abort if no remote output for this long (heartbeat every 15s)")
 }
 
 // buildExecCommand composes the final remote shell command from argv plus

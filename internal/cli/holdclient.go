@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/cklxx/tune/internal/config"
 	"golang.org/x/crypto/ssh"
@@ -109,29 +110,64 @@ func holdRoundTrip(fc *frameConn, req holdRequest, stdin io.Reader, stdout, stde
 		_ = fc.writeFrame(frameStdinEOF, nil)
 	}
 
-	for {
-		t, payload, err := fc.readFrame()
-		if err != nil {
-			return 0, fmt.Errorf("held connection lost mid-operation: %w", err)
+	type frameResult struct {
+		t   byte
+		p   []byte
+		err error
+	}
+	frameCh := make(chan frameResult, 1)
+	go func() {
+		for {
+			t, payload, err := fc.readFrame()
+			frameCh <- frameResult{t, payload, err}
+			if err != nil {
+				return
+			}
 		}
-		switch t {
-		case frameStdout:
-			if _, err := stdout.Write(payload); err != nil {
-				return 0, err
+	}()
+
+	lastFrame := time.Now()
+	idleTimer := time.NewTimer(execIdle)
+	defer idleTimer.Stop()
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case res := <-frameCh:
+			lastFrame = time.Now()
+			if res.err != nil {
+				return 0, fmt.Errorf("held connection lost mid-operation: %w", res.err)
 			}
-		case frameStderr:
-			if _, err := stderr.Write(payload); err != nil {
-				return 0, err
+			if !idleTimer.Stop() {
+				<-idleTimer.C
 			}
-		case frameExit:
-			var x holdExit
-			if err := json.Unmarshal(payload, &x); err != nil {
-				return 0, err
+			idleTimer.Reset(execIdle)
+			switch res.t {
+			case frameStdout:
+				if _, err := stdout.Write(res.p); err != nil {
+					return 0, err
+				}
+			case frameStderr:
+				if _, err := stderr.Write(res.p); err != nil {
+					return 0, err
+				}
+			case frameExit:
+				var x holdExit
+				if err := json.Unmarshal(res.p, &x); err != nil {
+					return 0, err
+				}
+				if x.Err != "" {
+					return x.Code, errors.New(x.Err)
+				}
+				return x.Code, nil
 			}
-			if x.Err != "" {
-				return x.Code, errors.New(x.Err)
+		case <-heartbeat.C:
+			if idle := time.Since(lastFrame); idle >= 10*time.Second {
+				fmt.Fprintf(stderr, "tn: still running, no output for %s\n", idle.Round(time.Second))
 			}
-			return x.Code, nil
+		case <-idleTimer.C:
+			return 0, fmt.Errorf("held connection: no response for %s (daemon crashed or SSH dropped)", execIdle)
 		}
 	}
 }
