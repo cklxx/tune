@@ -113,11 +113,11 @@ func holdProbe(sock string) (*holdHello, error) {
 // open for a request. It is observation-only: callers that own startup or
 // cleanup decide whether a failed socket should be removed.
 func holdAttach(sock string) (net.Conn, *holdHello, error) {
-	conn, err := net.DialTimeout("unix", sock, 500*time.Millisecond)
+	conn, err := net.DialTimeout("unix", sock, 2*time.Second)
 	if err != nil {
 		return nil, nil, err
 	}
-	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	t, payload, err := newFrameConn(conn).readFrame()
 	if err != nil || t != frameHello {
 		conn.Close()
@@ -221,6 +221,8 @@ type holdDaemon struct {
 	sftpMu sync.Mutex
 	sftpc  *sftp.Client
 
+	sem chan struct{} // limits concurrent ops to prevent resource exhaustion
+
 	ln       net.Listener
 	stopOnce sync.Once
 	done     chan struct{}
@@ -233,6 +235,7 @@ func newHoldDaemon(host *config.Host, c *sshx.Client, dialMs int64, idle time.Du
 		dialMs: dialMs,
 		since:  time.Now(),
 		idle:   idle,
+		sem:    make(chan struct{}, 64),
 		done:   make(chan struct{}),
 	}
 	d.touch()
@@ -331,6 +334,15 @@ func (d *holdDaemon) serveConn(nc net.Conn) {
 	var req holdRequest
 	if err := json.Unmarshal(payload, &req); err != nil {
 		_ = fc.writeJSON(frameExit, holdExit{Code: 1, Err: "bad request: " + err.Error()})
+		return
+	}
+
+	// Limit concurrent ops to prevent goroutine/resource exhaustion under load.
+	select {
+	case d.sem <- struct{}{}:
+		defer func() { <-d.sem }()
+	default:
+		_ = fc.writeJSON(frameExit, holdExit{Code: 1, Err: "hold daemon: too many concurrent operations, retry"})
 		return
 	}
 
