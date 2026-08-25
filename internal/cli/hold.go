@@ -48,9 +48,11 @@ socket is stale — every command silently falls back to a direct dial,
 so holding is purely an optimization, never a requirement.
 
 The daemon exits on its own after --idle (default 30m) with no
-operations, when the SSH connection drops, or on "tn hold --stop". A
-stale socket left by a killed daemon is detected and cleaned up by the
-next tn command. Logs go to ~/.tn/hold-<host>.log.
+operations, when the SSH connection drops, when the held connection
+stops accepting channels (a half-dead connection is treated as dead —
+the next command then dials direct and starts a fresh hold), or on
+"tn hold --stop". A stale socket left by a killed daemon is detected
+and cleaned up by the next tn command. Logs go to ~/.tn/hold-<host>.log.
 
 The background dial cannot prompt: it needs non-interactive auth
 (identityFile, agent, or passwordCmd) and an already-pinned host key.
@@ -242,6 +244,39 @@ func newHoldDaemon(host *config.Host, c *sshx.Client, dialMs int64, idle time.Du
 	return d
 }
 
+// connBroken reports whether the held SSH connection can no longer open
+// channels. The TCP transport can stay alive while the remote stops
+// accepting sessions (sshd restart, MaxSessions, rejects) — SSH().Wait()
+// never fires in that state, so without this probe the daemon would serve
+// a dead connection forever. An unresponsive probe counts as broken.
+func (d *holdDaemon) connBroken() bool {
+	ch := make(chan bool, 1)
+	go func() {
+		sess, err := d.client.SSH().NewSession()
+		if err != nil {
+			ch <- true
+			return
+		}
+		_ = sess.Close()
+		ch <- false
+	}()
+	select {
+	case broken := <-ch:
+		return broken
+	case <-time.After(5 * time.Second):
+		return true
+	}
+}
+
+// shutdownOnDeadConn probes the held connection after an op failure and
+// shuts the daemon down if the connection itself is the cause, so clients
+// fall back to a direct dial and a fresh hold.
+func (d *holdDaemon) shutdownOnDeadConn() {
+	if d.connBroken() {
+		d.shutdown("ssh connection stopped accepting channels")
+	}
+}
+
 func (d *holdDaemon) logf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, time.Now().Format("2006-01-02 15:04:05")+" "+format+"\n", args...)
 }
@@ -403,6 +438,7 @@ func (d *holdDaemon) dispatch(fc *frameConn, req holdRequest) (int, error) {
 func (d *holdDaemon) opExec(fc *frameConn, req holdRequest) (int, error) {
 	sess, err := d.client.SSH().NewSession()
 	if err != nil {
+		d.shutdownOnDeadConn()
 		return 0, err
 	}
 	defer sess.Close()
@@ -492,6 +528,7 @@ func (d *holdDaemon) withSFTP(f func(*sftp.Client) error) error {
 	if d.sftpc == nil {
 		sc, err := newSFTP(d.client)
 		if err != nil {
+			d.shutdownOnDeadConn()
 			d.sftpMu.Unlock()
 			return err
 		}

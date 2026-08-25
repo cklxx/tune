@@ -435,6 +435,38 @@ func TestHoldIdleShutdown(t *testing.T) {
 	}
 }
 
+// TestHoldShutsDownWhenChannelsRejected: the SSH handshake succeeds but the
+// remote rejects every session channel (sshd restart / MaxSessions) — the
+// half-dead state SSH().Wait() cannot see. The first failed op must shut the
+// daemon down so the next command falls back to a direct dial.
+func TestHoldShutsDownWhenChannelsRejected(t *testing.T) {
+	kp := sshtest.GenKey(t)
+	srv := sshtest.Start(t, sshtest.Options{AllowedKey: kp.PublicKey})
+	c, host := dialHost(t, srv, kp)
+	sock := filepath.Join(shortTempDir(t), "h.sock")
+	d := startDaemon(t, host, c, time.Minute, sock)
+
+	if _, _, _, err := heldOp(t, sock, holdRequest{Op: "exec", Args: []string{"true"}}, nil); err == nil {
+		t.Fatal("exec expected to fail against a session-rejecting server")
+	}
+
+	select {
+	case <-d.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("daemon did not shut down after channel opens failed")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Stat(sock); os.IsNotExist(err) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("socket not removed after shutdown")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // TestTryHeldRouting: the transparent client path — attach when the daemon
 // is up, fall back when the socket is missing or the config target moved.
 func TestTryHeldRouting(t *testing.T) {
