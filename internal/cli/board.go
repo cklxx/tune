@@ -104,6 +104,22 @@ func runBoard() error {
 		draw()
 	}
 
+	// Same as merge, but for results that arrive one at a time.
+	mergeOne := func(group []config.Host) func(int, poolState) {
+		return func(i int, st poolState) {
+			if i >= len(group) {
+				return
+			}
+			mu.Lock()
+			if idx, ok := index[group[i].Name]; ok {
+				states[idx] = st
+			}
+			tick++
+			mu.Unlock()
+			draw()
+		}
+	}
+
 	// Split by probe cost. Jump-server hosts take up to 20s each; they must not
 	// sit inside the fast loop or the table freezes at one frame per 20s.
 	var fast, slow []config.Host
@@ -117,7 +133,7 @@ func runBoard() error {
 
 	draw() // first frame before any probe, so a slow ssh does not look like a hang
 	if len(fast) > 0 {
-		go func() { merge(fast, probePool(fast)) }()
+		go probeStream(fast, mergeOne(fast))
 	}
 
 	stop := make(chan struct{})
@@ -185,7 +201,7 @@ func runBoard() error {
 			mu.Unlock()
 		case n == 1 && buf[0] == 'r':
 			if len(fast) > 0 {
-				go func() { merge(fast, probePool(fast)) }()
+				go probeStream(fast, mergeOne(fast))
 			}
 			if len(slow) > 0 {
 				go func() { merge(slow, probePool(slow)) }()
@@ -213,7 +229,7 @@ func runBoard() error {
 			}
 			fmt.Print("\033[?25l")
 			if len(fast) > 0 {
-				go func() { merge(fast, probePool(fast)) }()
+				go probeStream(fast, mergeOne(fast))
 			}
 		}
 		draw()

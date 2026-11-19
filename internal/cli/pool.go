@@ -164,7 +164,7 @@ func clampPct(n int) int {
 
 var (
 	boardInterval = 5 * time.Second
-	boardProbeTO  = 20 * time.Second
+	boardProbeTO  = 35 * time.Second
 	poolJSON      bool
 	poolAll       bool
 )
@@ -214,6 +214,33 @@ func loadPool(includeHidden bool) []config.Host {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// probeStream probes every host concurrently and emits each result as soon as
+// it lands, so one slow host (a jump-server hop can take 25s) does not hold
+// back the rest of the table.
+func probeStream(hosts []config.Host, emit func(i int, st poolState)) {
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
+	for i, h := range hosts {
+		wg.Add(1)
+		go func(i int, h config.Host) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			emit(i, probePoolHost(h))
+		}(i, h)
+	}
+	wg.Wait()
+}
+
+// probeTimeout gives slow paths more room: a jump-server hop costs 20-30s, and
+// killing it at the normal budget produced an unhelpful "signal: killed".
+func probeTimeout(h config.Host) time.Duration {
+	if hasTag(h, "bastion-only") || hasTag(h, "slow") || h.Jump != nil {
+		return 50 * time.Second
+	}
+	return 15 * time.Second
 }
 
 func probePool(hosts []config.Host) []poolState {
@@ -324,11 +351,16 @@ func probeBastion(h config.Host, st poolState) poolState {
 	if host, _, err := net.SplitHostPort(config.EnsureAddrPort(st.Addr)); err == nil {
 		ip = host
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), boardProbeTO)
+	to := probeTimeout(h)
+	ctx, cancel := context.WithTimeout(context.Background(), to)
 	defer cancel()
 	start := time.Now()
 	out, err := exec.CommandContext(ctx, config.Home()+"/bastion.sh", ip, "sh .tn/metrics.sh").CombinedOutput()
 	st.RTTMs = time.Since(start).Milliseconds()
+	if ctx.Err() != nil {
+		st.Detail = fmt.Sprintf("no response in %s", boardProbeTO)
+		return st
+	}
 	// The jump server closes the connection right after the command, so the
 	// exit status is 255 even on success. Trust the payload instead.
 	if err == nil || strings.Contains(string(out), "TN_METRIC") {
@@ -336,8 +368,18 @@ func probeBastion(h config.Host, st poolState) poolState {
 		parseMetrics(string(out), &st)
 		return st
 	}
-	st.Detail = firstLine(out, err)
+	st.Detail = firstLine(out, err, ctx.Err() != nil)
 	return st
+}
+
+// hostTimeout gives jump-server and queued hops more room: a cold GSSAPI
+// handshake plus a tunnel can take 25s, and killing at 15s reports a timeout
+// for a host that is merely slow.
+func hostTimeout(h config.Host) time.Duration {
+	if hasTag(h, "slow") || hasTag(h, "bastion-only") || h.Jump != nil {
+		return 45 * time.Second
+	}
+	return 15 * time.Second
 }
 
 func probePoolHost(h config.Host) poolState {
@@ -352,24 +394,32 @@ func probePoolHost(h config.Host) poolState {
 		"-o", "StrictHostKeyChecking=accept-new",
 		"-o", "LogLevel=ERROR",
 		metricsCommand())
-	ctx, cancel := context.WithTimeout(context.Background(), boardProbeTO)
+	to := probeTimeout(h)
+	ctx, cancel := context.WithTimeout(context.Background(), to)
 	defer cancel()
 	start := time.Now()
 	out, err := exec.CommandContext(ctx, "/usr/bin/ssh", args...).CombinedOutput()
 	st.RTTMs = time.Since(start).Milliseconds()
+	if ctx.Err() != nil {
+		st.Detail = fmt.Sprintf("no response in %s", boardProbeTO)
+		return st
+	}
 	if err == nil {
 		st.Up = true
 		parseMetrics(string(out), &st)
 		return st
 	}
-	st.Detail = firstLine(out, err)
+	st.Detail = firstLine(out, err, ctx.Err() != nil)
 	return st
 }
 
-func firstLine(out []byte, err error) string {
+func firstLine(out []byte, err error, timedOut bool) string {
 	msg := strings.TrimSpace(string(out))
 	if msg == "" && err != nil {
 		msg = err.Error()
+		if timedOut {
+			msg = fmt.Sprintf("no response in %s", boardProbeTO)
+		}
 	}
 	if i := strings.IndexByte(msg, '\n'); i > 0 {
 		msg = msg[:i]
@@ -411,26 +461,23 @@ func dot(up bool, color bool) string {
 	return "\033[31m●" + colReset
 }
 
-// cell renders "lbl  42%   10G/50G". Widths are fixed so the numbers line up
-// down a column regardless of how wide the absolute figure is. The label is
-// dimmed so the value, not the word, carries the eye.
-func cell(label string, p int, abs string, color bool) string {
-	pct := "  --"
+// metricCell renders one table cell: "42% 10G/50G". The percentage is
+// coloured; the absolute figure trails it. Padding is applied to the plain
+// text first, because fmt counts escape bytes as width.
+func metricCell(p int, abs string, width int, color bool) string {
+	head := "  --"
 	if p >= 0 {
-		pct = fmt.Sprintf("%3d%%", p)
+		head = fmt.Sprintf("%3d%%", p)
 	}
-	shown := pct
-	lbl := fmt.Sprintf("%4s", label)
-	if color {
-		lbl = colDim + lbl + colReset
-		if p >= 0 {
-			shown = "\033[" + colorFor(p) + "m" + pct + colReset
-		}
+	plain := head
+	if abs != "" {
+		plain += " " + abs
 	}
-	if abs == "" {
-		return fmt.Sprintf("%s %s", lbl, shown)
+	plain = fmt.Sprintf("%-*s", width, plain)
+	if color && p >= 0 {
+		return "\033[" + colorFor(p) + "m" + head + colReset + plain[len(head):]
 	}
-	return fmt.Sprintf("%s %s %10s", lbl, shown, abs)
+	return plain
 }
 
 // humanKB scales a KiB count to the largest unit that keeps it under 1000,
@@ -513,6 +560,13 @@ func renderPool(states []poolState, sel int, tick int, width int, color bool) st
 	}
 	b.WriteString(head + "\n\n")
 
+	cols := fmt.Sprintf("    %-24s %6s %5s  %-15s  %-15s  %-15s",
+		"HOST", "RTT", "CPU", "MEM", "DISK", "GPU")
+	if color {
+		cols = colDim + cols + colReset
+	}
+	b.WriteString(cols + "\n")
+
 	for i, s := range states {
 		addr := s.Addr
 		if host, _, err := net.SplitHostPort(config.EnsureAddrPort(s.Addr)); err == nil {
@@ -529,28 +583,27 @@ func renderPool(states []poolState, sel int, tick int, width int, color bool) st
 				cursor = ">"
 			}
 		}
-		addrShown := fmt.Sprintf("%-15s", addr)
-		if color {
-			addrShown = colDim + addrShown + colReset
-		}
-		line1 := fmt.Sprintf("%s %s %-12s %s %6s", cursor, dot(s.Up, color), s.Name, addrShown, rtt)
-		var line2 string
+		host := fmt.Sprintf("%-14s %s", s.Name, addr)
+		host = fmt.Sprintf("%-24s", host)
+
+		var line string
 		if s.Up {
-			line2 = "     " + strings.Join([]string{
-				cell("cpu", s.CPU, "", color),
-				cell("mem", s.Mem, memAbs(s), color),
-				cell("disk", s.Disk, diskAbs(s), color),
-				cell("gpu", s.GPU, gpuAbs(s), color),
-			}, "  ")
-		} else if s.Detail != "" {
-			line2 = "     " + s.Detail
-			if color {
-				line2 = "     " + "\033[31m" + s.Detail + colReset
-			}
+			cpu := metricCell(s.CPU, "", 5, color)
+			line = fmt.Sprintf("%s %s %s %6s %s  %s  %s  %s",
+				cursor, dot(s.Up, color), host, rtt, cpu,
+				metricCell(s.Mem, memAbs(s), 15, color),
+				metricCell(s.Disk, diskAbs(s), 15, color),
+				metricCell(s.GPU, gpuAbs(s), 15, color))
+		} else {
+			line = fmt.Sprintf("%s %s %s %6s", cursor, dot(s.Up, color), host, rtt)
 		}
-		b.WriteString(truncate(line1, width) + "\n")
-		if line2 != "" {
-			b.WriteString(truncate(line2, width) + "\n")
+		b.WriteString(truncate(line, width) + "\n")
+		if !s.Up && s.Detail != "" {
+			detail := "      " + s.Detail
+			if color {
+				detail = "      " + colDim + "\033[31m" + s.Detail + colReset
+			}
+			b.WriteString(truncate(detail, width) + "\n")
 		}
 	}
 	b.WriteString("\n")
