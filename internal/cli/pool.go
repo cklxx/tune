@@ -396,11 +396,8 @@ func colorFor(p int) string {
 	}
 }
 
-// cell renders one metric: optional bar, percentage, and the absolute figure.
-// The absolute part is the point: "83%" alone does not say whether 83% is
-// 8 GiB or 800 GiB.
-// dot is the whole status column: green up, red down. A word ("up"/"down")
-// costs four cells and says nothing a colour does not.
+// dot is the whole status column: green up, red down. A word costs four cells
+// and says nothing a colour does not.
 func dot(up bool, color bool) string {
 	if !color {
 		if up {
@@ -414,19 +411,26 @@ func dot(up bool, color bool) string {
 	return "\033[31m●" + colReset
 }
 
-// cell renders "label  42% absolute". The label lives in the row, not in a
-// header, so each host block reads on its own. Absolutes are right-aligned so
-// the numbers line up down the column.
+// cell renders "lbl  42%   10G/50G". Widths are fixed so the numbers line up
+// down a column regardless of how wide the absolute figure is. The label is
+// dimmed so the value, not the word, carries the eye.
 func cell(label string, p int, abs string, color bool) string {
-	pct := "  -"
+	pct := "  --"
 	if p >= 0 {
 		pct = fmt.Sprintf("%3d%%", p)
 	}
-	body := fmt.Sprintf("%-5s %s %s", label, pct, abs)
-	if color && p >= 0 {
-		body = fmt.Sprintf("%-5s \033[%sm%s%s %s", label, colorFor(p), pct, colReset, abs)
+	shown := pct
+	lbl := fmt.Sprintf("%4s", label)
+	if color {
+		lbl = colDim + lbl + colReset
+		if p >= 0 {
+			shown = "\033[" + colorFor(p) + "m" + pct + colReset
+		}
 	}
-	return body
+	if abs == "" {
+		return fmt.Sprintf("%s %s", lbl, shown)
+	}
+	return fmt.Sprintf("%s %s %10s", lbl, shown, abs)
 }
 
 // humanKB scales a KiB count to the largest unit that keeps it under 1000,
@@ -498,11 +502,16 @@ func renderPool(states []poolState, sel int, tick int, width int, color bool) st
 			up++
 		}
 	}
+	var head string
 	if tick > 0 {
-		fmt.Fprintf(&b, "tn board   %d/%d up   refresh %s   tick %d\n", up, len(states), boardInterval, tick)
+		head = fmt.Sprintf("tn board   %d/%d up   refresh %s   tick %d", up, len(states), boardInterval, tick)
 	} else {
-		fmt.Fprintf(&b, "tn pool   %d/%d up\n", up, len(states))
+		head = fmt.Sprintf("tn pool   %d/%d up", up, len(states))
 	}
+	if color {
+		head = colDim + head + colReset
+	}
+	b.WriteString(head + "\n\n")
 
 	for i, s := range states {
 		addr := s.Addr
@@ -513,29 +522,43 @@ func renderPool(states []poolState, sel int, tick int, width int, color bool) st
 		if s.Up {
 			rtt = rttStr(s.RTTMs)
 		}
-		head := fmt.Sprintf("%s %-12s %-16s %5s", dot(s.Up, color), s.Name, addr, rtt)
-		var body string
+		cursor := " "
+		if i == sel {
+			cursor = "\033[36m❯" + colReset
+			if !color {
+				cursor = ">"
+			}
+		}
+		addrShown := fmt.Sprintf("%-15s", addr)
+		if color {
+			addrShown = colDim + addrShown + colReset
+		}
+		line1 := fmt.Sprintf("%s %s %-12s %s %6s", cursor, dot(s.Up, color), s.Name, addrShown, rtt)
+		var line2 string
 		if s.Up {
-			body = fmt.Sprintf("     %s  %s  %s  %s",
+			line2 = "     " + strings.Join([]string{
 				cell("cpu", s.CPU, "", color),
 				cell("mem", s.Mem, memAbs(s), color),
 				cell("disk", s.Disk, diskAbs(s), color),
-				cell("gpu", s.GPU, gpuAbs(s), color))
+				cell("gpu", s.GPU, gpuAbs(s), color),
+			}, "  ")
 		} else if s.Detail != "" {
-			body = "     " + s.Detail
+			line2 = "     " + s.Detail
+			if color {
+				line2 = "     " + "\033[31m" + s.Detail + colReset
+			}
 		}
-		head = truncate(head, width)
-		body = truncate(body, width)
-		if i == sel && color {
-			head = "\033[7m" + head + colReset
-			body = "\033[7m" + body + colReset
-		}
-		b.WriteString(head + "\n")
-		if body != "" {
-			b.WriteString(body + "\n")
+		b.WriteString(truncate(line1, width) + "\n")
+		if line2 != "" {
+			b.WriteString(truncate(line2, width) + "\n")
 		}
 	}
-	b.WriteString("\nj/k move   enter connect   r refresh   q quit\n")
+	b.WriteString("\n")
+	foot := "j/k move   enter connect   r refresh   q quit"
+	if color {
+		foot = colDim + foot + colReset
+	}
+	b.WriteString(foot + "\n")
 	return b.String()
 }
 
