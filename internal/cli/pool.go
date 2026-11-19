@@ -358,7 +358,7 @@ func probeBastion(h config.Host, st poolState) poolState {
 	out, err := exec.CommandContext(ctx, config.Home()+"/bastion.sh", ip, "sh .tn/metrics.sh").CombinedOutput()
 	st.RTTMs = time.Since(start).Milliseconds()
 	if ctx.Err() != nil {
-		st.Detail = fmt.Sprintf("no response in %s", boardProbeTO)
+		st.Detail = fmt.Sprintf("no response in %s", hostTimeout(h))
 		return st
 	}
 	// The jump server closes the connection right after the command, so the
@@ -368,7 +368,7 @@ func probeBastion(h config.Host, st poolState) poolState {
 		parseMetrics(string(out), &st)
 		return st
 	}
-	st.Detail = firstLine(out, err, ctx.Err() != nil)
+	st.Detail = firstLine(out, err, ctx.Err() != nil, hostTimeout(h))
 	return st
 }
 
@@ -401,7 +401,7 @@ func probePoolHost(h config.Host) poolState {
 	out, err := exec.CommandContext(ctx, "/usr/bin/ssh", args...).CombinedOutput()
 	st.RTTMs = time.Since(start).Milliseconds()
 	if ctx.Err() != nil {
-		st.Detail = fmt.Sprintf("no response in %s", boardProbeTO)
+		st.Detail = fmt.Sprintf("no response in %s", hostTimeout(h))
 		return st
 	}
 	if err == nil {
@@ -409,16 +409,16 @@ func probePoolHost(h config.Host) poolState {
 		parseMetrics(string(out), &st)
 		return st
 	}
-	st.Detail = firstLine(out, err, ctx.Err() != nil)
+	st.Detail = firstLine(out, err, ctx.Err() != nil, hostTimeout(h))
 	return st
 }
 
-func firstLine(out []byte, err error, timedOut bool) string {
+func firstLine(out []byte, err error, timedOut bool, to time.Duration) string {
 	msg := strings.TrimSpace(string(out))
 	if msg == "" && err != nil {
 		msg = err.Error()
 		if timedOut {
-			msg = fmt.Sprintf("no response in %s", boardProbeTO)
+			msg = fmt.Sprintf("no response in %s", to)
 		}
 	}
 	if i := strings.IndexByte(msg, '\n'); i > 0 {
@@ -560,7 +560,7 @@ func renderPool(states []poolState, sel int, tick int, width int, color bool) st
 	}
 	b.WriteString(head + "\n\n")
 
-	cols := fmt.Sprintf("    %-24s %6s %5s  %-15s  %-15s  %-15s",
+	cols := fmt.Sprintf("    %-10s %6s %5s  %-15s  %-15s  %-15s",
 		"HOST", "RTT", "CPU", "MEM", "DISK", "GPU")
 	if color {
 		cols = colDim + cols + colReset
@@ -583,25 +583,33 @@ func renderPool(states []poolState, sel int, tick int, width int, color bool) st
 				cursor = ">"
 			}
 		}
-		host := fmt.Sprintf("%-14s %s", s.Name, addr)
-		host = fmt.Sprintf("%-24s", host)
 
+		// The host cell wraps: the name shares the first line with the metrics,
+		// the address sits underneath it. A 26-column name+address cell made
+		// every metric column drift right.
 		var line string
 		if s.Up {
-			cpu := metricCell(s.CPU, "", 5, color)
-			line = fmt.Sprintf("%s %s %s %6s %s  %s  %s  %s",
-				cursor, dot(s.Up, color), host, rtt, cpu,
+			line = fmt.Sprintf("%s %s %-10s %6s %s  %s  %s  %s",
+				cursor, dot(s.Up, color), s.Name, rtt,
+				metricCell(s.CPU, "", 5, color),
 				metricCell(s.Mem, memAbs(s), 15, color),
 				metricCell(s.Disk, diskAbs(s), 15, color),
 				metricCell(s.GPU, gpuAbs(s), 15, color))
 		} else {
-			line = fmt.Sprintf("%s %s %s %6s", cursor, dot(s.Up, color), host, rtt)
+			line = fmt.Sprintf("%s %s %-10s %6s", cursor, dot(s.Up, color), s.Name, rtt)
 		}
 		b.WriteString(truncate(line, width) + "\n")
+
+		addrLine := "      " + addr
+		if color {
+			addrLine = "      " + colDim + addr + colReset
+		}
+		b.WriteString(truncate(addrLine, width) + "\n")
+
 		if !s.Up && s.Detail != "" {
 			detail := "      " + s.Detail
 			if color {
-				detail = "      " + colDim + "\033[31m" + s.Detail + colReset
+				detail = "      " + "\033[31m" + s.Detail + colReset
 			}
 			b.WriteString(truncate(detail, width) + "\n")
 		}
