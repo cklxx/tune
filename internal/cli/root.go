@@ -57,6 +57,8 @@ func Execute() error {
 		benchCmd,
 		uploadKeyCmd,
 		doctorCmd,
+		poolCmd,
+		boardCmd,
 		mirrorCmd,
 	)
 	return rootCmd.Execute()

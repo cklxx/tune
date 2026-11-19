@@ -165,6 +165,45 @@ effects. The set:
 - **TOFU host-key pinning.** First connect prompts; subsequent connects
   verify against `~/.tn/known_hosts`. `--accept-new` to skip the prompt
   on trusted networks; `--insecure-host-key` for ad-hoc testing only.
+- **`tn pool`** — one table for every host in the config: up/down, RTT,
+  failure reason. `--json` for scripts, `--all` to include hidden hosts.
+- **`tn board`** — live version of the pool with CPU, memory, disk and GPU
+  utilisation per host, drawn as colour-coded bars (green below 60%, yellow to
+  85%, red above). `j`/`k` move, `enter` connects, `r` refreshes, `q` quits.
+  Runs `~/.tn/kt.sh` first, so a Kerberos ticket is renewed without a manual
+  `kinit`.
+
+## Host pool
+
+`~/.tn/config.yaml` is the single source of truth for the pool. Three optional
+fields exist for heterogeneous fleets:
+
+```yaml
+hosts:
+  digest:
+    target: {addr: 10.37.112.238:22, user: chenkailun.c}
+    tags: [cpu]                 # free-form labels, shown by the board
+  n199:
+    target: {addr: 10.199.16.196:22, user: tiger}
+    transport: ssh              # GSSAPI-only: go through /usr/bin/ssh
+  n252:
+    target: {addr: 10.13.23.252:22, user: tiger}
+    transport: ssh
+    tags: [bastion-only]        # reached by typing ssh on the jump server
+  old-box:
+    target: {addr: 10.0.0.9:22, user: root}
+    hidden: true                # kept out of the board and `tn pool`
+```
+
+`transport: ssh` and `bastion-only` exist because `golang.org/x/crypto/ssh`
+cannot speak GSSAPI. `tn exec`, `tn shell`, `tn pool` and `tn board` all honor
+it: for those hosts they call `/usr/bin/ssh` instead of dialing with the Go
+client. `bastion-only` hosts are driven by `~/.tn/bastion.sh`, an expect script
+that opens the jump server session, types the inner `ssh`, and keeps the outer
+connection's delegated ticket.
+
+`tn push`, `tn pull`, `tn read`, `tn write`, `tn ls` and `tn mirror` still use
+the Go client only, so they do not work on GSSAPI-only hosts.
 
 ## Letting the remote use your local network
 

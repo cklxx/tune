@@ -43,6 +43,9 @@ connection. Interactive calls reuse an existing hold or dial directly (see
 	Args:               cobra.MinimumNArgs(1),
 	DisableFlagParsing: false,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if h, err := resolveHost(); err == nil && usesSystemSSH(h) {
+			return runSystemSSH(h, args, false)
+		}
 		req := holdRequest{Op: "exec", Args: args, Env: execEnv, Cwd: execCwd, Proxy: execProxy}
 		code, ok, host, err := tryHeld(req, os.Stdin, os.Stdout, os.Stderr)
 		if ok {

@@ -26,6 +26,9 @@ local shell.`,
 	Example: `  tn shell
   tn shell -H prod`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if h, err := resolveHost(); err == nil && usesSystemSSH(h) {
+			return runSystemSSH(h, nil, true)
+		}
 		c, _, err := connect()
 		if err != nil {
 			return err

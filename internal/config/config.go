@@ -36,6 +36,14 @@ type Host struct {
 	Jump *Hop `yaml:"jump,omitempty"`
 	// KnownHosts, when set, overrides the default $TN_HOME/known_hosts.
 	KnownHosts string `yaml:"knownHosts,omitempty"`
+	// Transport records how the host must be reached. Empty means tn's own
+	// Go SSH client. "ssh" means the host accepts a method that client cannot
+	// speak (GSSAPI), so callers should shell out to /usr/bin/ssh.
+	Transport string `yaml:"transport,omitempty"`
+	// Tags are free-form labels for the board and for filtering.
+	Tags []string `yaml:"tags,omitempty"`
+	// Hidden keeps a host out of the board's default view.
+	Hidden bool `yaml:"hidden,omitempty"`
 }
 
 type Config struct {
