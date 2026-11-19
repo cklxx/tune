@@ -568,9 +568,15 @@ func renderPool(states []poolState, sel int, tick int, width int, color bool) st
 	b.WriteString(cols + "\n")
 
 	for i, s := range states {
+		// Keep a non-default port on the address line: 127.0.0.1 alone does not
+		// say which tunnel it is. ":22" is dropped as noise.
 		addr := s.Addr
-		if host, _, err := net.SplitHostPort(config.EnsureAddrPort(s.Addr)); err == nil {
-			addr = host
+		if host, port, err := net.SplitHostPort(config.EnsureAddrPort(s.Addr)); err == nil {
+			if port == "22" {
+				addr = host
+			} else {
+				addr = host + ":" + port
+			}
 		}
 		rtt := "-"
 		if s.Up {
@@ -600,19 +606,20 @@ func renderPool(states []poolState, sel int, tick int, width int, color bool) st
 		}
 		b.WriteString(truncate(line, width) + "\n")
 
+		// Address and, when the probe failed, the reason share one line.
 		addrLine := "      " + addr
 		if color {
 			addrLine = "      " + colDim + addr + colReset
 		}
-		b.WriteString(truncate(addrLine, width) + "\n")
-
 		if !s.Up && s.Detail != "" {
-			detail := "      " + s.Detail
+			addrLine += "  "
 			if color {
-				detail = "      " + "\033[31m" + s.Detail + colReset
+				addrLine += "\033[31m" + s.Detail + colReset
+			} else {
+				addrLine += s.Detail
 			}
-			b.WriteString(truncate(detail, width) + "\n")
 		}
+		b.WriteString(truncate(addrLine, width) + "\n")
 	}
 	b.WriteString("\n")
 	foot := "j/k move   enter connect   r refresh   q quit"
