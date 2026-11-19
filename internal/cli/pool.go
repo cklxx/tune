@@ -327,9 +327,11 @@ func probeBastion(h config.Host, st poolState) poolState {
 	ctx, cancel := context.WithTimeout(context.Background(), boardProbeTO)
 	defer cancel()
 	start := time.Now()
-	out, err := exec.CommandContext(ctx, config.Home()+"/bastion.sh", ip, metricsCommand()).CombinedOutput()
+	out, err := exec.CommandContext(ctx, config.Home()+"/bastion.sh", ip, "sh .tn/metrics.sh").CombinedOutput()
 	st.RTTMs = time.Since(start).Milliseconds()
-	if err == nil {
+	// The jump server closes the connection right after the command, so the
+	// exit status is 255 even on success. Trust the payload instead.
+	if err == nil || strings.Contains(string(out), "TN_METRIC") {
 		st.Up = true
 		parseMetrics(string(out), &st)
 		return st
@@ -412,31 +414,19 @@ func dot(up bool, color bool) string {
 	return "\033[31m●" + colReset
 }
 
-// cell renders one metric. Figures are right-aligned so decimal points line up
-// down the column; colour marks the utilisation band.
-func cell(p int, abs string, color bool) string {
-	if p < 0 {
-		return "               "
+// cell renders "label  42% absolute". The label lives in the row, not in a
+// header, so each host block reads on its own. Absolutes are right-aligned so
+// the numbers line up down the column.
+func cell(label string, p int, abs string, color bool) string {
+	pct := "  -"
+	if p >= 0 {
+		pct = fmt.Sprintf("%3d%%", p)
 	}
-	body := fmt.Sprintf("%3d%% %10s", p, abs)
-	if color {
-		return "\033[" + colorFor(p) + "m" + body + colReset
+	body := fmt.Sprintf("%-5s %s %s", label, pct, abs)
+	if color && p >= 0 {
+		body = fmt.Sprintf("%-5s \033[%sm%s%s %s", label, colorFor(p), pct, colReset, abs)
 	}
 	return body
-}
-
-// rttStr keeps the RTT column a fixed narrow width: milliseconds below one
-// second, one decimal above it. "7173ms" wastes two cells and squeezes the
-// metric columns on a 100-column terminal.
-func rttStr(ms int64) string {
-	switch {
-	case ms < 1000:
-		return fmt.Sprintf("%dms", ms)
-	case ms < 60000:
-		return fmt.Sprintf("%.1fs", float64(ms)/1000)
-	default:
-		return fmt.Sprintf("%dm", ms/60000)
-	}
 }
 
 // humanKB scales a KiB count to the largest unit that keeps it under 1000,
@@ -459,30 +449,23 @@ func humanKB(v int64) string {
 // humanMB is humanKB for values already in MiB.
 func humanMB(v int) string { return humanKB(int64(v) * 1024) }
 
-func cpuAbs(s poolState) string {
-	if s.NCPU <= 0 {
-		return "--"
-	}
-	return fmt.Sprintf("%.2f/%d", s.Load, s.NCPU)
-}
-
 func memAbs(s poolState) string {
 	if s.MemTotalKB <= 0 {
-		return "--"
+		return ""
 	}
 	return humanKB(s.MemUsedKB) + "/" + humanKB(s.MemTotalKB)
 }
 
 func diskAbs(s poolState) string {
 	if s.DiskTotalKB <= 0 {
-		return "--"
+		return ""
 	}
 	return humanKB(s.DiskUsedKB) + "/" + humanKB(s.DiskTotalKB)
 }
 
 func gpuAbs(s poolState) string {
 	if s.GPUTotalMB <= 0 {
-		return "--"
+		return ""
 	}
 	return humanMB(s.GPUUsedMB) + "/" + humanMB(s.GPUTotalMB)
 }
@@ -491,6 +474,19 @@ func gpuAbs(s poolState) string {
 // 120 columns; narrow terminals must pass their real width or the rows wrap
 // and the redraw leaves debris. Bars are dropped below 96 columns; absolute
 // figures are always kept.
+// rttStr keeps the RTT column narrow: milliseconds below one second, one
+// decimal above it, minutes past a minute. "7173ms" wastes two cells.
+func rttStr(ms int64) string {
+	switch {
+	case ms < 1000:
+		return fmt.Sprintf("%dms", ms)
+	case ms < 60000:
+		return fmt.Sprintf("%.1fs", float64(ms)/1000)
+	default:
+		return fmt.Sprintf("%dm", ms/60000)
+	}
+}
+
 func renderPool(states []poolState, sel int, tick int, width int, color bool) string {
 	if width <= 0 {
 		width = 120
@@ -503,45 +499,41 @@ func renderPool(states []poolState, sel int, tick int, width int, color bool) st
 		}
 	}
 	if tick > 0 {
-		fmt.Fprintf(&b, "tn board   %d/%d up   refresh %s   tick %d\n\n", up, len(states), boardInterval, tick)
+		fmt.Fprintf(&b, "tn board   %d/%d up   refresh %s   tick %d\n", up, len(states), boardInterval, tick)
 	} else {
-		fmt.Fprintf(&b, "tn pool   %d/%d up\n\n", up, len(states))
+		fmt.Fprintf(&b, "tn pool   %d/%d up\n", up, len(states))
 	}
-	hdr := fmt.Sprintf("%-25s  %s %-6s %-15s %-15s %-15s %s",
-		"HOST", " ", "RTT", "CPU", "MEM", "DISK", "GPU")
-	if color {
-		hdr = colDim + hdr + colReset
-	}
-	b.WriteString(hdr + "\n")
 
 	for i, s := range states {
-		state := dot(s.Up, color)
-		rtt := "-"
-		if s.Up {
-			rtt = rttStr(s.RTTMs)
-		}
 		addr := s.Addr
 		if host, _, err := net.SplitHostPort(config.EnsureAddrPort(s.Addr)); err == nil {
 			addr = host
 		}
-		host := fmt.Sprintf("%-11s %s", s.Name, addr)
-		var line string
+		rtt := "-"
 		if s.Up {
-			line = fmt.Sprintf("%-25s  %s %-6s %s %s %s %s", host, state, rtt,
-				cell(s.CPU, cpuAbs(s), color),
-				cell(s.Mem, memAbs(s), color),
-				cell(s.Disk, diskAbs(s), color),
-				cell(s.GPU, gpuAbs(s), color))
-		} else {
-			// No readings on a down host: show why instead of five blank columns.
-			line = fmt.Sprintf("%-25s  %s %-6s %s", host, state, rtt, s.Detail)
+			rtt = rttStr(s.RTTMs)
 		}
-		line = truncate(line, width)
+		head := fmt.Sprintf("%s %-12s %-16s %5s", dot(s.Up, color), s.Name, addr, rtt)
+		var body string
+		if s.Up {
+			body = fmt.Sprintf("     %s  %s  %s  %s",
+				cell("cpu", s.CPU, "", color),
+				cell("mem", s.Mem, memAbs(s), color),
+				cell("disk", s.Disk, diskAbs(s), color),
+				cell("gpu", s.GPU, gpuAbs(s), color))
+		} else if s.Detail != "" {
+			body = "     " + s.Detail
+		}
+		head = truncate(head, width)
+		body = truncate(body, width)
 		if i == sel && color {
-			line = "\033[7m" + line + colReset
+			head = "\033[7m" + head + colReset
+			body = "\033[7m" + body + colReset
 		}
-		b.WriteString(line)
-		b.WriteByte('\n')
+		b.WriteString(head + "\n")
+		if body != "" {
+			b.WriteString(body + "\n")
+		}
 	}
 	b.WriteString("\nj/k move   enter connect   r refresh   q quit\n")
 	return b.String()

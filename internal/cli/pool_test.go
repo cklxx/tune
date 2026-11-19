@@ -84,11 +84,11 @@ func TestRenderStatusColorAndAbsolute(t *testing.T) {
 	out := renderPool([]poolState{up, down}, -1, 1, 120, true)
 	for _, want := range []string{
 		"\033[32m●", "\033[31m●", // green up, red down
-		"7.2s",                    // RTT scaled to seconds
-		"3.60/8",                  // CPU absolute load/cores
-		"10G/50G",                 // memory absolute
-		"800G/1.0T",               // disk absolute, unit auto-scaled
-		"connection refused",      // failure reason, not blank columns
+		"7.2s",               // RTT scaled to seconds
+		"45%",                // CPU is a percentage only
+		"10G/50G",            // memory absolute
+		"800G/1.0T",          // disk absolute, unit auto-scaled
+		"connection refused", // failure reason, not blank columns
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q\n%s", want, out)

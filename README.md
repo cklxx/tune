@@ -198,9 +198,17 @@ hosts:
 `transport: ssh` and `bastion-only` exist because `golang.org/x/crypto/ssh`
 cannot speak GSSAPI. `tn exec`, `tn shell`, `tn pool` and `tn board` all honor
 it: for those hosts they call `/usr/bin/ssh` instead of dialing with the Go
-client. `bastion-only` hosts are driven by `~/.tn/bastion.sh`, an expect script
-that opens the jump server session, types the inner `ssh`, and keeps the outer
-connection's delegated ticket.
+client.
+
+`bastion-only` hosts go through `~/.tn/bastion.sh`, which runs
+`ssh -K -tt <jump> -tt "ssh <user>@<host> <cmd>"`. Two constraints are encoded
+there:
+
+- The jump server accepts a bare command only. No flags, no pipes, no quoting.
+  Metrics therefore come from a script pre-installed on the target at
+  `~/.tn/metrics.sh`.
+- The jump drops sessions whose stdout is a pipe. Probes are wrapped in
+  `script -q /dev/null` so the hop gets a pseudo-terminal.
 
 `tn push`, `tn pull`, `tn read`, `tn write`, `tn ls` and `tn mirror` still use
 the Go client only, so they do not work on GSSAPI-only hosts.

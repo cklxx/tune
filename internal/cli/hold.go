@@ -281,6 +281,21 @@ func (d *holdDaemon) logf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, time.Now().Format("2006-01-02 15:04:05")+" "+format+"\n", args...)
 }
 
+func auditHoldRequest(req holdRequest, peer string) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	path := filepath.Join(home, ".tn", "hold-audit.log")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "%s op=%s args=%q cwd=%q path=%q local=%q remote=%q peer=%q\n",
+		time.Now().Format(time.RFC3339Nano), req.Op, req.Args, req.Cwd, req.Path, req.Local, req.Remote, peer)
+}
+
 func (d *holdDaemon) touch() { d.last.Store(time.Now().UnixNano()) }
 
 // run serves ln until shutdown. Closing ln unlinks the socket (Go's
@@ -371,6 +386,7 @@ func (d *holdDaemon) serveConn(nc net.Conn) {
 		_ = fc.writeJSON(frameExit, holdExit{Code: 1, Err: "bad request: " + err.Error()})
 		return
 	}
+	auditHoldRequest(req, holdPeerInfo(nc))
 
 	// Limit concurrent ops to prevent goroutine/resource exhaustion under load.
 	select {
