@@ -94,6 +94,9 @@ func TestRenderStatusColorAndAbsolute(t *testing.T) {
 			t.Errorf("output missing %q\n%s", want, out)
 		}
 	}
+	if strings.Contains(out, "3.60/8") {
+		t.Error("CPU should show the percentage only, not load/cores")
+	}
 }
 
 func TestRenderNoColorWhenAsked(t *testing.T) {
