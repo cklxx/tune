@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/cklxx/tune/internal/config"
@@ -178,7 +180,7 @@ unless --all is given. --json emits the same data for scripts and agents.
 Each row shows state, RTT, and CPU / memory / disk / GPU utilisation as a
 percentage plus the absolute figure (load over core count, used over total).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		states := probePool(loadPool(poolAll))
+		states := probePool(context.Background(), loadPool(poolAll))
 		if poolJSON {
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
@@ -219,7 +221,7 @@ func loadPool(includeHidden bool) []config.Host {
 // probeStream probes every host concurrently and emits each result as soon as
 // it lands, so one slow host (a jump-server hop can take 25s) does not hold
 // back the rest of the table.
-func probeStream(hosts []config.Host, emit func(i int, st poolState)) {
+func probeStream(ctx context.Context, hosts []config.Host, emit func(i int, st poolState)) {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 8)
 	for i, h := range hosts {
@@ -228,7 +230,7 @@ func probeStream(hosts []config.Host, emit func(i int, st poolState)) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			emit(i, probePoolHost(h))
+			emit(i, probePoolHost(ctx, h))
 		}(i, h)
 	}
 	wg.Wait()
@@ -243,7 +245,7 @@ func probeTimeout(h config.Host) time.Duration {
 	return 15 * time.Second
 }
 
-func probePool(hosts []config.Host) []poolState {
+func probePool(ctx context.Context, hosts []config.Host) []poolState {
 	states := make([]poolState, len(hosts))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 8)
@@ -253,7 +255,7 @@ func probePool(hosts []config.Host) []poolState {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			states[i] = probePoolHost(h)
+			states[i] = probePoolHost(ctx, h)
 		}(i, h)
 	}
 	wg.Wait()
@@ -342,20 +344,60 @@ func hasTag(h config.Host, want string) bool {
 	return false
 }
 
+// runProbe runs a command in its own process group. Killing only the direct
+// child leaves its children alive: a bastion probe is script(1) -> ssh ->
+// ssh, and an orphaned inner ssh kept probing for minutes after the board
+// moved on. The group kill takes the whole tree down.
+// probeGroups tracks in-flight probe process groups so the UI can kill them
+// synchronously on exit. Relying on context cancellation alone left one ssh
+// alive: main returned before the goroutine reached its select.
+var probeGroups sync.Map
+
+// killProbes kills every in-flight probe group. Call it on UI exit.
+func killProbes() {
+	probeGroups.Range(func(k, _ any) bool {
+		_ = syscall.Kill(-k.(int), syscall.SIGKILL)
+		return true
+	})
+}
+
+func runProbe(ctx context.Context, name string, args ...string) ([]byte, error) {
+	cmd := exec.Command(name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	probeGroups.Store(cmd.Process.Pid, true)
+	defer probeGroups.Delete(cmd.Process.Pid)
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		return buf.Bytes(), err
+	case <-ctx.Done():
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		<-done
+		return buf.Bytes(), ctx.Err()
+	}
+}
+
 // probeBastion checks a host that is reachable only through the jump server.
 // The jump accepts an interactive session and nothing else, so ~/.tn/bastion.sh
 // drives it with expect; $PPID makes the marker unpredictable, so the terminal
 // echo of the typed command cannot satisfy the match.
-func probeBastion(h config.Host, st poolState) poolState {
+func probeBastion(ctx context.Context, h config.Host, st poolState) poolState {
 	ip := st.Addr
 	if host, _, err := net.SplitHostPort(config.EnsureAddrPort(st.Addr)); err == nil {
 		ip = host
 	}
 	to := probeTimeout(h)
-	ctx, cancel := context.WithTimeout(context.Background(), to)
+	ctx, cancel := context.WithTimeout(ctx, to)
 	defer cancel()
 	start := time.Now()
-	out, err := exec.CommandContext(ctx, config.Home()+"/bastion.sh", ip, "sh .tn/metrics.sh").CombinedOutput()
+	out, err := runProbe(ctx, config.Home()+"/bastion.sh", ip, "sh .tn/metrics.sh")
 	st.RTTMs = time.Since(start).Milliseconds()
 	if ctx.Err() != nil {
 		st.Detail = fmt.Sprintf("no response in %s", hostTimeout(h))
@@ -382,11 +424,11 @@ func hostTimeout(h config.Host) time.Duration {
 	return 15 * time.Second
 }
 
-func probePoolHost(h config.Host) poolState {
+func probePoolHost(ctx context.Context, h config.Host) poolState {
 	st := poolState{Name: h.Name, Addr: h.Target.Addr, User: h.Target.User,
 		CPU: -1, Mem: -1, Disk: -1, GPU: -1}
 	if hasTag(h, "bastion-only") {
-		return probeBastion(h, st)
+		return probeBastion(ctx, h, st)
 	}
 	args := append(sshArgs(h),
 		"-o", "BatchMode=yes",
@@ -395,10 +437,10 @@ func probePoolHost(h config.Host) poolState {
 		"-o", "LogLevel=ERROR",
 		metricsCommand())
 	to := probeTimeout(h)
-	ctx, cancel := context.WithTimeout(context.Background(), to)
+	ctx, cancel := context.WithTimeout(ctx, to)
 	defer cancel()
 	start := time.Now()
-	out, err := exec.CommandContext(ctx, "/usr/bin/ssh", args...).CombinedOutput()
+	out, err := runProbe(ctx, "/usr/bin/ssh", args...)
 	st.RTTMs = time.Since(start).Milliseconds()
 	if ctx.Err() != nil {
 		st.Detail = fmt.Sprintf("no response in %s", hostTimeout(h))

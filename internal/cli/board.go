@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cklxx/tune/internal/config"
@@ -90,6 +92,12 @@ func runBoard() error {
 		drawMu.Unlock()
 	}
 
+	// Probe results arrive from many goroutines. Redrawing once per result made
+	// the terminal the bottleneck and the UI felt stuck while the network was
+	// slow. The probes only mark the view dirty; one goroutine paints.
+	var dirty atomic.Bool
+	requestDraw := func() { dirty.Store(true) }
+
 	merge := func(group []config.Host, st []poolState) {
 		mu.Lock()
 		for i, h := range group {
@@ -101,7 +109,7 @@ func runBoard() error {
 		}
 		tick++
 		mu.Unlock()
-		draw()
+		requestDraw()
 	}
 
 	// Same as merge, but for results that arrive one at a time.
@@ -116,7 +124,7 @@ func runBoard() error {
 			}
 			tick++
 			mu.Unlock()
-			draw()
+			requestDraw()
 		}
 	}
 
@@ -131,17 +139,61 @@ func runBoard() error {
 		}
 	}
 
+	// One round per group at a time. A slow host (a jump hop costs 20s) would
+	// otherwise stack rounds: at a 5s interval the board reached 20 concurrent
+	// ssh processes and the whole machine crawled.
+	// Cancelling this context on exit kills in-flight probes, including the
+	// children of a bastion hop, so quitting leaves no ssh behind.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer killProbes()
+
+	var fastBusy, slowBusy atomic.Bool
+	refreshFast := func() {
+		if !fastBusy.CompareAndSwap(false, true) {
+			return
+		}
+		go func() {
+			defer fastBusy.Store(false)
+			probeStream(ctx, fast, mergeOne(fast))
+		}()
+	}
+	refreshSlow := func() {
+		if !slowBusy.CompareAndSwap(false, true) {
+			return
+		}
+		go func() {
+			defer slowBusy.Store(false)
+			merge(slow, probePool(ctx, slow))
+		}()
+	}
+
 	draw() // first frame before any probe, so a slow ssh does not look like a hang
 	if len(fast) > 0 {
-		go probeStream(fast, mergeOne(fast))
+		refreshFast()
 	}
 
 	stop := make(chan struct{})
 	defer close(stop)
 
+	go func() {
+		t := time.NewTicker(120 * time.Millisecond)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				if dirty.CompareAndSwap(true, false) {
+					draw()
+				}
+			}
+		}
+	}()
+
 	if len(slow) > 0 {
 		go func() {
-			merge(slow, probePool(slow))
+			merge(slow, probePool(ctx, slow))
 			t := time.NewTicker(60 * time.Second)
 			defer t.Stop()
 			for {
@@ -149,7 +201,7 @@ func runBoard() error {
 				case <-stop:
 					return
 				case <-t.C:
-					merge(slow, probePool(slow))
+					refreshSlow()
 				}
 			}
 		}()
@@ -164,7 +216,7 @@ func runBoard() error {
 				return
 			case <-t.C:
 				_ = exec.Command("sh", config.Home()+"/kt.sh").Run()
-				merge(fast, probePool(fast))
+				merge(fast, probePool(ctx, fast))
 			}
 		}
 	}()
@@ -200,11 +252,9 @@ func runBoard() error {
 			}
 			mu.Unlock()
 		case n == 1 && buf[0] == 'r':
-			if len(fast) > 0 {
-				go probeStream(fast, mergeOne(fast))
-			}
+			refreshFast()
 			if len(slow) > 0 {
-				go func() { merge(slow, probePool(slow)) }()
+				refreshSlow()
 			}
 		case n == 1 && (buf[0] == '\r' || buf[0] == '\n'):
 			mu.Lock()
@@ -228,9 +278,7 @@ func runBoard() error {
 				return err
 			}
 			fmt.Print("\033[?25l")
-			if len(fast) > 0 {
-				go probeStream(fast, mergeOne(fast))
-			}
+			refreshFast()
 		}
 		draw()
 	}
