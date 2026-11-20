@@ -98,6 +98,8 @@ func runBoard() error {
 	var dirty atomic.Bool
 	requestDraw := func() { dirty.Store(true) }
 
+	lastProbe := make(map[string]time.Time, len(hosts))
+
 	merge := func(group []config.Host, st []poolState) {
 		mu.Lock()
 		for i, h := range group {
@@ -121,6 +123,7 @@ func runBoard() error {
 			mu.Lock()
 			if idx, ok := index[group[i].Name]; ok {
 				states[idx] = st
+				lastProbe[group[i].Name] = time.Now()
 			}
 			tick++
 			mu.Unlock()
@@ -148,6 +151,30 @@ func runBoard() error {
 	defer cancel()
 	defer killProbes()
 
+	// due returns the hosts whose next probe is worth paying for. A session on
+	// these machines costs 4-10s regardless of the command, so probing a host
+	// that just answered 2s ago only adds load.
+	due := func(group []config.Host) []config.Host {
+		mu.Lock()
+		defer mu.Unlock()
+		now := time.Now()
+		out := make([]config.Host, 0, len(group))
+		for _, h := range group {
+			gap := boardInterval
+			if idx, ok := index[h.Name]; ok {
+				if st := states[idx]; st.Up && st.RTTMs > 0 {
+					if d := time.Duration(st.RTTMs*2) * time.Millisecond; d > gap {
+						gap = d
+					}
+				}
+			}
+			if last, ok := lastProbe[h.Name]; !ok || now.Sub(last) >= gap {
+				out = append(out, h)
+			}
+		}
+		return out
+	}
+
 	var fastBusy, slowBusy atomic.Bool
 	refreshFast := func() {
 		if !fastBusy.CompareAndSwap(false, true) {
@@ -155,7 +182,11 @@ func runBoard() error {
 		}
 		go func() {
 			defer fastBusy.Store(false)
-			probeStream(ctx, fast, mergeOne(fast))
+			group := due(fast)
+			if len(group) == 0 {
+				return
+			}
+			probeStream(ctx, group, mergeOne(group))
 		}()
 	}
 	refreshSlow := func() {
